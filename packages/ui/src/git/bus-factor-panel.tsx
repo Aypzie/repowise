@@ -7,6 +7,8 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { Users } from "lucide-react";
+import { EmptyState } from "../shared/empty-state";
 import { truncatePath } from "../lib/format";
 import type { Hotspot } from "@repowise-dev/types/git";
 
@@ -15,6 +17,16 @@ interface BusFactorPanelProps {
 }
 
 export function BusFactorPanel({ hotspots }: BusFactorPanelProps) {
+  if (!hotspots || hotspots.length === 0) {
+    return (
+      <EmptyState
+        icon={<Users className="h-8 w-8" />}
+        title="No bus factor data"
+        description="No ownership data is available for this repository."
+      />
+    );
+  }
+
   const high = hotspots.filter((h) => h.bus_factor >= 3).length;
   const medium = hotspots.filter((h) => h.bus_factor === 2).length;
   const low = hotspots.filter((h) => h.bus_factor <= 1).length;
@@ -48,7 +60,7 @@ export function BusFactorPanel({ hotspots }: BusFactorPanelProps) {
               }}
               formatter={(value, name) => {
                 const n = typeof value === "number" ? value : 0;
-                const label = name === "high" ? "Safe (â‰¥3)" : name === "medium" ? "Warning (2)" : "Risk (â‰¤1)";
+                const label = name === "high" ? "Safe (≥3)" : name === "medium" ? "Warning (2)" : "Risk (≤1)";
                 return [`${n} files`, label];
               }}
             />
@@ -59,13 +71,13 @@ export function BusFactorPanel({ hotspots }: BusFactorPanelProps) {
         </ResponsiveContainer>
         <div className="flex items-center gap-4 mt-2 text-[10px] text-[var(--color-text-tertiary)]">
           <span className="flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-sm bg-green-500" /> Safe (â‰¥3): {high}
+            <span className="inline-block h-2 w-2 rounded-sm bg-green-500" /> Safe (≥3): {high}
           </span>
           <span className="flex items-center gap-1">
             <span className="inline-block h-2 w-2 rounded-sm bg-yellow-500" /> Warning (2): {medium}
           </span>
           <span className="flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-sm bg-red-500" /> Risk (â‰¤1): {low}
+            <span className="inline-block h-2 w-2 rounded-sm bg-red-500" /> Risk (≤1): {low}
           </span>
         </div>
       </div>

@@ -1,12 +1,14 @@
-import { Landmark } from "lucide-react";
+import { Landmark, Lightbulb } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
+import { EmptyState } from "../shared/empty-state";
 import { formatRelativeTime } from "../lib/format";
 import type { DecisionRecord } from "@repowise-dev/types/decisions";
 
 interface DecisionsTimelineProps {
   decisions: DecisionRecord[];
   repoId: string;
+  linkPrefix?: string;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -23,20 +25,19 @@ const STATUS_BADGE_VARIANT: Record<string, string> = {
   superseded: "text-[var(--color-text-tertiary)] border-[var(--color-text-tertiary)]/30",
 };
 
-export function DecisionsTimeline({ decisions, repoId }: DecisionsTimelineProps) {
+export function DecisionsTimeline({ decisions, repoId, linkPrefix }: DecisionsTimelineProps) {
+  const prefix = linkPrefix ?? `/repos/${repoId}`;
   const recent = decisions.slice(0, 6);
 
   if (recent.length === 0) {
     return (
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Landmark className="h-4 w-4 text-[var(--color-text-secondary)]" />
-            Recent Decisions
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <p className="text-xs text-[var(--color-text-tertiary)]">No decisions recorded</p>
+        <CardContent className="p-0">
+          <EmptyState
+            icon={<Lightbulb className="h-8 w-8" />}
+            title="No decisions recorded"
+            description="No architectural decisions have been detected in this repository."
+          />
         </CardContent>
       </Card>
     );
@@ -51,7 +52,7 @@ export function DecisionsTimeline({ decisions, repoId }: DecisionsTimelineProps)
             Recent Decisions
           </span>
           <a
-            href={`/repos/${repoId}/decisions`}
+            href={`${prefix}/decisions`}
             className="text-[10px] text-[var(--color-accent-primary)] hover:underline font-normal"
           >
             View all
@@ -66,7 +67,7 @@ export function DecisionsTimeline({ decisions, repoId }: DecisionsTimelineProps)
             {recent.map((d) => (
               <a
                 key={d.id}
-                href={`/repos/${repoId}/decisions/${d.id}`}
+                href={`${prefix}/decisions/${d.id}`}
                 className="flex items-start gap-3 pl-0 group relative"
               >
                 <span
@@ -86,7 +87,7 @@ export function DecisionsTimeline({ decisions, repoId }: DecisionsTimelineProps)
                   </div>
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
                     {formatRelativeTime(d.created_at)}
-                    {d.source && ` Â· ${d.source.replace("_", " ")}`}
+                    {d.source && ` · ${d.source.replace("_", " ")}`}
                   </span>
                 </div>
               </a>

@@ -15,7 +15,6 @@ import {
   Search,
   GitBranch,
   Code2,
-  BarChart3,
   Users,
   Flame,
   Trash2,
@@ -44,12 +43,11 @@ const GLOBAL_NAV = [
 function repoNavItems(repoId: string) {
   return [
     { label: "Overview", href: `/repos/${repoId}/overview`, icon: Activity },
-    { label: "Chat", href: `/repos/${repoId}`, icon: MessageSquare },
+    { label: "Chat", href: `/repos/${repoId}`, icon: MessageSquare, exact: true },
     { label: "Docs", href: `/repos/${repoId}/docs`, icon: BookOpen },
     { label: "Search", href: `/repos/${repoId}/search`, icon: Search },
     { label: "Graph", href: `/repos/${repoId}/graph`, icon: GitBranch },
     { label: "Symbols", href: `/repos/${repoId}/symbols`, icon: Code2 },
-    { label: "Coverage", href: `/repos/${repoId}/coverage`, icon: BarChart3 },
     { label: "Ownership", href: `/repos/${repoId}/ownership`, icon: Users },
     { label: "Hotspots", href: `/repos/${repoId}/hotspots`, icon: Flame },
     { label: "Dead Code", href: `/repos/${repoId}/dead-code`, icon: Trash2 },
@@ -60,7 +58,7 @@ function repoNavItems(repoId: string) {
 }
 
 const WORKSPACE_NAV = [
-  { label: "Overview", href: "/workspace", icon: Layers },
+  { label: "Overview", href: "/workspace", icon: Layers, exact: true as const },
   { label: "Contracts", href: "/workspace/contracts", icon: Link2 },
   { label: "Co-Changes", href: "/workspace/co-changes", icon: GitMerge },
 ];
@@ -187,10 +185,9 @@ export function MobileNav({ repos = [], workspace }: MobileNavProps) {
                   <nav className="space-y-1">
                     {WORKSPACE_NAV.map((item) => {
                       const Icon = item.icon;
-                      const isActive =
-                        item.href === "/workspace"
-                          ? pathname === "/workspace"
-                          : pathname.startsWith(`${item.href}`);
+                      const isActive = (item as { exact?: boolean }).exact
+                        ? pathname === item.href
+                        : pathname.startsWith(`${item.href}`);
                       return (
                         <Link
                           key={item.href}
@@ -242,9 +239,9 @@ export function MobileNav({ repos = [], workspace }: MobileNavProps) {
                             <div className="ml-3.5 mt-0.5 space-y-0.5 border-l border-[var(--color-border-default)] pl-3">
                               {navItems.map((item) => {
                                 const Icon = item.icon;
-                                const isActive =
-                                  pathname === item.href ||
-                                  pathname.startsWith(`${item.href}/`);
+                                const isActive = (item as { exact?: boolean }).exact
+                                  ? pathname === item.href
+                                  : pathname === item.href || pathname.startsWith(`${item.href}/`);
                                 return (
                                   <Link
                                     key={item.href}

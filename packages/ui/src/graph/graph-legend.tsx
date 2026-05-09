@@ -1,18 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, memo } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { LANGUAGE_COLORS } from "../lib/confidence";
+import { EDGE_COLORS, getCommunityColor } from "./sigma/constants";
 import type { ColorMode, ViewMode } from "./graph-toolbar";
-
-const COMMUNITY_SAMPLE = [
-  { color: "#6366f1", label: "Community 1" },
-  { color: "#ec4899", label: "Community 2" },
-  { color: "#10b981", label: "Community 3" },
-  { color: "#f59e0b", label: "Community 4" },
-  { color: "#3b82f6", label: "Community 5" },
-  { color: "#a855f7", label: "Community 6" },
-];
 
 const LANGUAGE_LEGEND = [
   { lang: "python", color: LANGUAGE_COLORS.python, label: "Python" },
@@ -30,14 +22,26 @@ interface GraphLegendProps {
   colorMode: ColorMode;
   viewMode: ViewMode;
   communityLabels?: Map<number, string>;
+  onCommunityClick?: (communityId: number) => void;
+  activeCommunities?: Set<number> | undefined;
+  onCommunityToggle?: (communityId: number) => void;
+  onToggleAllCommunities?: (selectAll: boolean) => void;
+  visibleEdgeTypes?: Set<string> | undefined;
+  onEdgeTypeToggle?: ((edgeType: string) => void) | undefined;
 }
 
-export function GraphLegend({
+export const GraphLegend = memo(function GraphLegend({
   nodeCount,
   edgeCount,
   colorMode,
   viewMode,
   communityLabels,
+  onCommunityClick,
+  activeCommunities,
+  onCommunityToggle,
+  onToggleAllCommunities,
+  visibleEdgeTypes,
+  onEdgeTypeToggle,
 }: GraphLegendProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -74,28 +78,74 @@ export function GraphLegend({
               </div>
             ))}
 
-          {colorMode === "community" &&
-            (communityLabels && communityLabels.size > 0
-              ? Array.from(communityLabels.entries())
-                  .slice(0, 8)
-                  .map(([cid, label], i) => (
-                    <div key={cid} className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
-                      <span
-                        className="w-2 h-2 rounded-full shrink-0"
-                        style={{ background: COMMUNITY_SAMPLE[i % COMMUNITY_SAMPLE.length]?.color ?? "#888" }}
-                      />
-                      <span className="truncate">{label}</span>
-                    </div>
-                  ))
-              : COMMUNITY_SAMPLE.map((c, i) => (
-                  <div key={i} className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
-                    <span
-                      className="w-2 h-2 rounded-full shrink-0"
-                      style={{ background: c.color }}
-                    />
-                    <span>{c.label}</span>
-                  </div>
-                )))}
+          {colorMode === "community" && (() => {
+            const entries = communityLabels && communityLabels.size > 0
+              ? Array.from(communityLabels.entries()).slice(0, 8)
+              : null;
+            const allSelected = !activeCommunities || (entries
+              ? entries.every(([cid]) => activeCommunities.has(cid))
+              : true);
+            return (
+              <>
+                {onToggleAllCommunities && entries && (
+                  <button
+                    onClick={() => onToggleAllCommunities(!allSelected)}
+                    className="text-[9px] text-[var(--color-accent-graph)] hover:underline mb-0.5"
+                  >
+                    {allSelected ? "Deselect All" : "Select All"}
+                  </button>
+                )}
+                {entries
+                  ? entries.map(([cid, label], i) => {
+                      const color = getCommunityColor(cid);
+                      const checked = !activeCommunities || activeCommunities.has(cid);
+                      return (
+                        <div
+                          key={cid}
+                          className={`flex items-center gap-2 text-[var(--color-text-tertiary)]${
+                            onCommunityClick
+                              ? " cursor-pointer rounded px-1 -mx-1 hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
+                              : ""
+                          }`}
+                        >
+                          {onCommunityToggle && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onCommunityToggle(cid); }}
+                              className="shrink-0 w-[10px] h-[10px] rounded-sm border"
+                              style={{
+                                borderColor: color,
+                                background: checked ? color : "transparent",
+                              }}
+                              aria-label={`Toggle community ${label}`}
+                            />
+                          )}
+                          {!onCommunityToggle && (
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ background: color }}
+                            />
+                          )}
+                          <span
+                            className="truncate"
+                            onClick={() => onCommunityClick?.(cid)}
+                          >
+                            {label}
+                          </span>
+                        </div>
+                      );
+                    })
+                  : Array.from({ length: 6 }, (_, i) => (
+                      <div key={i} className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ background: getCommunityColor(i) }}
+                        />
+                        <span>Community {i + 1}</span>
+                      </div>
+                    ))}
+              </>
+            );
+          })()}
 
           {colorMode === "risk" && (
             <>
@@ -114,15 +164,49 @@ export function GraphLegend({
             </>
           )}
 
+          {onEdgeTypeToggle && visibleEdgeTypes && (
+            <>
+              <p className="text-[9px] text-[var(--color-text-tertiary)] uppercase tracking-wider font-medium pt-1.5 border-t border-[var(--color-border-default)] mt-1.5">
+                Edges
+              </p>
+              {([
+                { type: "import", label: "Imports", color: EDGE_COLORS.import },
+                { type: "crossCommunity", label: "Cross-community", color: EDGE_COLORS.crossCommunity },
+                { type: "internal", label: "Internal", color: EDGE_COLORS.internal },
+                { type: "dynamic", label: "Dynamic", color: EDGE_COLORS.dynamic },
+                { type: "lowConfidence", label: "Low confidence", color: EDGE_COLORS.lowConfidence },
+              ] as const).map((et) => {
+                const checked = visibleEdgeTypes.has(et.type);
+                return (
+                  <div key={et.type} className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
+                    <button
+                      onClick={() => onEdgeTypeToggle(et.type)}
+                      className="shrink-0 w-[10px] h-[10px] rounded-sm border"
+                      style={{
+                        borderColor: et.color,
+                        background: checked ? et.color : "transparent",
+                      }}
+                      aria-label={`Toggle ${et.label} edges`}
+                    />
+                    <span className={checked ? "" : "line-through opacity-50"}>
+                      {et.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </>
+          )}
+
           {viewMode !== "module" && viewMode !== "full" && (
             <p className="text-[9px] text-[var(--color-text-tertiary)] pt-1 border-t border-[var(--color-border-default)]">
               {viewMode === "dead" && "Showing unreachable files"}
               {viewMode === "hotfiles" && "Most-committed files (30d)"}
               {viewMode === "architecture" && "Entry-point reachable (3 hops)"}
+              {viewMode === "unified" && "Unified: community + risk signals"}
             </p>
           )}
         </div>
       )}
     </div>
   );
-}
+});

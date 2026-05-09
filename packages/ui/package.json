@@ -1,11 +1,11 @@
 {
   "name": "@repowise-dev/ui",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "description": "Shared visualization components for the Repowise dashboard (packages/web) and downstream consumers. Domains: graph, git, dead-code, decisions, docs, symbols, coverage, wiki, chat, dashboard, workspace, jobs, blast-radius, plus shared primitives and hooks.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "files": ["src", "styles"],
   "sideEffects": [
     "./styles/globals.css",
     "**/*.css"
@@ -54,7 +54,8 @@
     "./ui/*": "./src/ui/*.tsx",
     "./lib/cn": "./src/lib/cn.ts",
     "./lib/confidence": "./src/lib/confidence.ts",
-    "./lib/format": "./src/lib/format.ts"
+    "./lib/format": "./src/lib/format.ts",
+    "./lib/page-types": "./src/lib/page-types.ts"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
@@ -77,18 +78,25 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@repowise-dev/types": "*",
+    "@sigma/edge-curve": "^3.1.0",
     "@xyflow/react": "^12.10.2",
     "class-variance-authority": "^0.7.1",
-    "fuse.js": "^7.0.0",
     "clsx": "^2.1.1",
     "d3-force": "^3.0.0",
+    "elkjs": "^0.11.1",
     "d3-hierarchy": "^3.1.2",
     "framer-motion": "^11.11.0",
+    "fuse.js": "^7.0.0",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
+    "graphology-layout-noverlap": "^0.4.2",
+    "graphology-types": "^0.24.8",
     "lucide-react": "^1.7.0",
     "mermaid": "^11.4.0",
     "react-markdown": "^10.1.0",
     "recharts": "^3.8.1",
     "remark-gfm": "^4.0.1",
+    "sigma": "^3.0.3",
     "tailwind-merge": "^3.5.0"
   },
   "peerDependencies": {

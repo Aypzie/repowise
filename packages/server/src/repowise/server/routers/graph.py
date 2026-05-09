@@ -59,6 +59,11 @@ router = APIRouter(
 )
 
 
+def _escape_like(s: str) -> str:
+    """Escape special characters for SQL LIKE patterns."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _parse_imported_names(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -93,11 +98,32 @@ async def module_graph(
     node_result = await session.execute(select(GraphNode).where(GraphNode.repository_id == repo_id))
     nodes = node_result.scalars().all()
 
-    # Group nodes by first path segment
+    # Group nodes by first path segment, detecting monorepo roots
+    first_level: dict[str, list[GraphNode]] = {}
+    for n in nodes:
+        parts = n.node_id.split("/")
+        seg = parts[0] if len(parts) > 1 else n.node_id
+        first_level.setdefault(seg, []).append(n)
+
+    total = len(nodes) or 1
+    monorepo_roots: set[str] = set()
+    for seg, seg_nodes in first_level.items():
+        # When a single top-level directory contains >70% of all files, treat it
+        # as a monorepo root and group by the *second* path segment instead.
+        # Threshold chosen empirically: catches src/-heavy repos without
+        # splitting balanced monorepos like packages/a + packages/b (each ~50%).
+        if len(seg_nodes) / total > 0.70:
+            monorepo_roots.add(seg)
+
     modules: dict[str, list[GraphNode]] = {}
     for n in nodes:
         parts = n.node_id.split("/")
-        module = parts[0] if len(parts) > 1 else n.node_id
+        if len(parts) <= 1:
+            module = n.node_id
+        elif parts[0] in monorepo_roots and len(parts) > 2:
+            module = parts[0] + "/" + parts[1]
+        else:
+            module = parts[0]
         modules.setdefault(module, []).append(n)
 
     # Fetch page confidence for doc coverage
@@ -602,7 +628,7 @@ async def search_nodes(
         select(GraphNode)
         .where(
             GraphNode.repository_id == repo_id,
-            GraphNode.node_id.ilike(f"%{q}%"),
+            GraphNode.node_id.ilike(f"%{_escape_like(q)}%"),
         )
         .order_by(GraphNode.symbol_count.desc(), GraphNode.pagerank.desc())
         .limit(limit)

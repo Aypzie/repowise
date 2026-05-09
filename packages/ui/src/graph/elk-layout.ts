@@ -1,5 +1,5 @@
 /**
- * ELK layout engine — transforms graph API data into React Flow nodes/edges.
+ * ELK layout engine — computes node positions for the Sigma canvas.
  *
  * Uses elkjs for deterministic hierarchical layout with compound nodes
  * representing directories.
@@ -7,7 +7,6 @@
 
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { ElkNode, ElkExtendedEdge } from "elkjs";
-import type { Node, Edge } from "@xyflow/react";
 import type {
   GraphNode as GraphNodeResponse,
   GraphLink as GraphEdgeResponse,
@@ -27,6 +26,7 @@ const elk = new ELK();
 // ---- Types ----
 
 export interface FileNodeData {
+  nodeType: "file";
   label: string;
   fullPath: string;
   language: string;
@@ -37,10 +37,13 @@ export interface FileNodeData {
   isTest: boolean;
   isEntryPoint: boolean;
   hasDoc: boolean;
+  isHotspot?: boolean | undefined;
+  isDead?: boolean | undefined;
   [key: string]: unknown;
 }
 
 export interface ModuleNodeData {
+  nodeType: "module";
   label: string;
   fullPath: string;
   fileCount: number;
@@ -54,13 +57,23 @@ export interface ModuleNodeData {
   hasDoc?: boolean;
   isEntryPoint?: boolean;
   isTest?: boolean;
+  dominantCommunityId?: number | undefined;
   [key: string]: unknown;
 }
 
 export interface DependencyEdgeData {
   importedNames: string[];
   edgeCount: number;
+  confidence?: number | undefined;
   [key: string]: unknown;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type?: string | undefined;
+  data?: Record<string, unknown> | undefined;
 }
 
 // ---- Helpers ----
@@ -85,10 +98,10 @@ function ancestorDirs(dir: string): string[] {
 /** Deduplicate edges: group by (source, target) pair, merge imported_names, sum count. */
 function deduplicateEdges(
   edges: GraphEdgeResponse[],
-): { source: string; target: string; importedNames: string[]; edgeCount: number }[] {
+): { source: string; target: string; importedNames: string[]; edgeCount: number; confidence: number | undefined }[] {
   const map = new Map<
     string,
-    { source: string; target: string; importedNames: string[]; edgeCount: number }
+    { source: string; target: string; importedNames: string[]; edgeCount: number; confidence: number | undefined }
   >();
   for (const e of edges) {
     const key = `${e.source}→${e.target}`;
@@ -96,12 +109,16 @@ function deduplicateEdges(
     if (existing) {
       existing.importedNames.push(...e.imported_names);
       existing.edgeCount++;
+      if (e.confidence != null) {
+        existing.confidence = Math.max(existing.confidence ?? 0, e.confidence);
+      }
     } else {
       map.set(key, {
         source: e.source,
         target: e.target,
         importedNames: [...e.imported_names],
         edgeCount: 1,
+        confidence: e.confidence,
       });
     }
   }
@@ -137,16 +154,29 @@ export function groupNodesAsModules(
     return { moduleNodes: [], moduleEdges: [], fileEntries: new Map() };
   }
 
+  // Auto-detect monorepo: if >50% of root-level nodes live under packages/,
+  // group by second segment (packages/<name>) instead of first segment.
+  const isMonorepo = !prefix &&
+    scopedNodes.filter((n) => n.node_id.startsWith("packages/")).length > scopedNodes.length * 0.5;
+
   // Group by next path segment after the prefix
   const modules = new Map<string, GraphNodeResponse[]>();
   const nodeToModule = new Map<string, string>();
 
   for (const n of scopedNodes) {
     const rest = prefix ? n.node_id.slice(slash.length) : n.node_id;
-    const slashIdx = rest.indexOf("/");
-    const moduleId = slashIdx >= 0
-      ? (prefix ? slash + rest.slice(0, slashIdx) : rest.slice(0, slashIdx))
-      : (prefix ? slash + rest : rest); // file at this level
+
+    let moduleId: string;
+    if (isMonorepo && rest.startsWith("packages/")) {
+      const afterPkg = rest.slice("packages/".length);
+      const idx = afterPkg.indexOf("/");
+      moduleId = idx >= 0 ? "packages/" + afterPkg.slice(0, idx) : rest;
+    } else {
+      const slashIdx = rest.indexOf("/");
+      moduleId = slashIdx >= 0
+        ? (prefix ? slash + rest.slice(0, slashIdx) : rest.slice(0, slashIdx))
+        : (prefix ? slash + rest : rest);
+    }
 
     const list = modules.get(moduleId) ?? [];
     list.push(n);
@@ -206,19 +236,45 @@ export function groupNodesAsModules(
   return { moduleNodes, moduleEdges, fileEntries };
 }
 
-// ---- Layout for file-level graph ----
+// ---- Pure position computation (for Sigma bridge) ----
 
-export async function layoutFileGraph(
+export interface ElkPositionResult {
+  positions: Map<string, { x: number; y: number; width: number; height: number }>;
+  groups: Map<string, { x: number; y: number; width: number; height: number }>;
+}
+
+function flattenPositions(
+  elkNode: ElkNode,
+  offsetX = 0,
+  offsetY = 0,
+  positions: Map<string, { x: number; y: number; width: number; height: number }>,
+  groups: Map<string, { x: number; y: number; width: number; height: number }>,
+) {
+  if (!elkNode.children) return;
+  for (const child of elkNode.children) {
+    const x = (child.x ?? 0) + offsetX;
+    const y = (child.y ?? 0) + offsetY;
+    const w = child.width ?? 0;
+    const h = child.height ?? 0;
+    if (child.id.startsWith("dir:")) {
+      groups.set(child.id, { x, y, width: w, height: h });
+      flattenPositions(child, x, y, positions, groups);
+    } else {
+      positions.set(child.id, { x, y, width: w, height: h });
+    }
+  }
+}
+
+export async function computeElkFilePositions(
   nodes: GraphNodeResponse[],
   edges: GraphEdgeResponse[],
-): Promise<{ nodes: Node[]; edges: Edge[] }> {
-  if (nodes.length === 0) return { nodes: [], edges: [] };
+): Promise<ElkPositionResult> {
+  if (nodes.length === 0) return { positions: new Map(), groups: new Map() };
 
   const nodeSet = new Set(nodes.map((n) => n.node_id));
   const validEdges = edges.filter((e) => nodeSet.has(e.source) && nodeSet.has(e.target));
   const dedupedEdges = deduplicateEdges(validEdges);
 
-  // Build directory hierarchy
   const dirSet = new Set<string>();
   for (const n of nodes) {
     const dir = dirOf(n.node_id);
@@ -229,10 +285,8 @@ export async function layoutFileGraph(
     }
   }
 
-  // Sort dirs so parents come before children
   const dirs = Array.from(dirSet).sort();
 
-  // Build ELK compound graph
   const elkGraph: ElkNode = {
     id: "root",
     layoutOptions: {
@@ -250,7 +304,6 @@ export async function layoutFileGraph(
     edges: [],
   };
 
-  // Create dir nodes as groups
   const dirElkNodes = new Map<string, ElkNode>();
   for (const dir of dirs) {
     const parts = dir.split("/");
@@ -266,7 +319,6 @@ export async function layoutFileGraph(
     dirElkNodes.set(dir, elkNode);
   }
 
-  // Nest dir nodes into their parents
   for (const dir of dirs) {
     const parentDir = dirOf(dir);
     const parentElk = parentDir ? dirElkNodes.get(parentDir) : null;
@@ -278,7 +330,6 @@ export async function layoutFileGraph(
     }
   }
 
-  // Add file nodes (sized by pagerank importance)
   for (const n of nodes) {
     const scale = 1 + Math.min(0.6, n.pagerank * 25);
     const elkFileNode: ElkNode = {
@@ -296,7 +347,6 @@ export async function layoutFileGraph(
     }
   }
 
-  // Add edges — ELK needs hierarchical edge format
   const elkEdges: ElkExtendedEdge[] = dedupedEdges.map((e, i) => ({
     id: `e${i}`,
     sources: [e.source],
@@ -304,122 +354,98 @@ export async function layoutFileGraph(
   }));
   elkGraph.edges = elkEdges;
 
-  // Compute layout
   const layout = await elk.layout(elkGraph);
 
-  // Flatten layout into React Flow nodes
-  const rfNodes: Node[] = [];
-  const rfEdges: Edge[] = [];
+  const positions = new Map<string, { x: number; y: number; width: number; height: number }>();
+  const groups = new Map<string, { x: number; y: number; width: number; height: number }>();
+  flattenPositions(layout, 0, 0, positions, groups);
 
-  function extractNodes(
-    elkNode: ElkNode,
-    parentId?: string,
-    offsetX = 0,
-    offsetY = 0,
-  ) {
-    if (!elkNode.children) return;
-    for (const child of elkNode.children) {
-      const x = (child.x ?? 0) + offsetX;
-      const y = (child.y ?? 0) + offsetY;
-      const isDir = child.id.startsWith("dir:");
+  return { positions, groups };
+}
 
-      if (isDir) {
-        const dirPath = child.id.slice(4);
-        const label = child.labels?.[0]?.text ?? dirPath;
-        rfNodes.push({
-          id: child.id,
-          type: "moduleGroup",
-          position: { x: child.x ?? 0, y: child.y ?? 0 },
-          ...(parentId ? { parentId, extent: "parent" as const } : {}),
-          style: {
-            width: child.width,
-            height: child.height,
-          },
-          data: {
-            label,
-            fullPath: dirPath,
-            fileCount: child.children?.filter((c) => !c.id.startsWith("dir:")).length ?? 0,
-          } satisfies Record<string, unknown>,
-        });
-        // Recurse into children
-        extractNodes(child, child.id);
-      } else {
-        const apiNode = nodes.find((n) => n.node_id === child.id);
-        if (apiNode) {
-          rfNodes.push({
-            id: child.id,
-            type: "fileNode",
-            position: { x: child.x ?? 0, y: child.y ?? 0 },
-            ...(parentId ? { parentId, extent: "parent" as const } : {}),
-            data: {
-              label: child.labels?.[0]?.text ?? apiNode.node_id,
-              fullPath: apiNode.node_id,
-              language: apiNode.language,
-              symbolCount: apiNode.symbol_count,
-              pagerank: apiNode.pagerank,
-              betweenness: apiNode.betweenness,
-              communityId: apiNode.community_id,
-              isTest: apiNode.is_test,
-              isEntryPoint: apiNode.is_entry_point,
-              hasDoc: apiNode.has_doc,
-              // View-specific fields (dead code, hot files)
-              ...("confidence_group" in apiNode && { confidenceGroup: (apiNode as Record<string, unknown>).confidence_group }),
-              ...("commit_count" in apiNode && { commitCount: (apiNode as Record<string, unknown>).commit_count }),
-            } satisfies FileNodeData,
-          });
-        }
-      }
+export async function computeElkModulePositions(
+  moduleNodes: ModuleNodeResponse[],
+  moduleEdges: ModuleEdgeResponse[],
+): Promise<Map<string, { x: number; y: number }>> {
+  if (moduleNodes.length === 0) return new Map();
+
+  const moduleIds = new Set(moduleNodes.map((m) => m.module_id));
+
+  // Build all ancestor directories for compound node nesting
+  const dirSet = new Set<string>();
+  for (const m of moduleNodes) {
+    const ancestors = ancestorDirs(dirOf(m.module_id));
+    for (const a of ancestors) {
+      if (!moduleIds.has(a)) dirSet.add(a);
     }
   }
+  const dirs = Array.from(dirSet).sort();
 
-  extractNodes(layout);
-
-  // Build React Flow edges
-  for (const e of dedupedEdges) {
-    rfEdges.push({
-      id: `${e.source}→${e.target}`,
-      source: e.source,
-      target: e.target,
-      type: "dependency",
-      data: {
-        importedNames: e.importedNames,
-        edgeCount: e.edgeCount,
-      } satisfies DependencyEdgeData,
+  // Create ELK compound nodes for each directory
+  const dirElkNodes = new Map<string, ElkNode>();
+  for (const dir of dirs) {
+    dirElkNodes.set(dir, {
+      id: `dir:${dir}`,
+      labels: [{ text: dir.split("/").pop() ?? dir }],
+      layoutOptions: {
+        "elk.padding": "[top=35,left=12,bottom=12,right=12]",
+      },
+      children: [],
     });
   }
 
-  return { nodes: rfNodes, edges: rfEdges };
-}
+  // Nest directories into their parents
+  const rootChildren: ElkNode[] = [];
+  for (const dir of dirs) {
+    const parentDir = dirOf(dir);
+    const parentElk = parentDir ? dirElkNodes.get(parentDir) : null;
+    const elkNode = dirElkNodes.get(dir)!;
+    if (parentElk) {
+      parentElk.children!.push(elkNode);
+    } else {
+      rootChildren.push(elkNode);
+    }
+  }
 
-// ---- Layout for module-level graph ----
+  // Place module nodes into their parent directory (or root)
+  for (const m of moduleNodes) {
+    const elkNode: ElkNode = {
+      id: m.module_id,
+      width: MODULE_NODE_WIDTH,
+      height: MODULE_NODE_HEIGHT,
+      labels: [{ text: m.module_id.split("/").pop() ?? m.module_id }],
+    };
+    const parentDir = dirOf(m.module_id);
+    const parentElk = parentDir ? dirElkNodes.get(parentDir) : null;
+    if (parentElk) {
+      parentElk.children!.push(elkNode);
+    } else {
+      rootChildren.push(elkNode);
+    }
+  }
 
-export async function layoutModuleGraph(
-  moduleNodes: ModuleNodeResponse[],
-  moduleEdges: ModuleEdgeResponse[],
-  fileEntries?: Map<string, GraphNodeResponse>,
-): Promise<{ nodes: Node[]; edges: Edge[] }> {
-  if (moduleNodes.length === 0) return { nodes: [], edges: [] };
+  // Remove empty compound nodes (directories with no children)
+  function pruneEmpty(node: ElkNode): boolean {
+    if (!node.children) return true;
+    node.children = node.children.filter(pruneEmpty);
+    return node.children.length > 0 || !node.id.startsWith("dir:");
+  }
+  rootChildren.forEach(pruneEmpty);
 
   const elkGraph: ElkNode = {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
       "elk.direction": "DOWN",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "80",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "40",
-      "elk.spacing.nodeNode": "40",
-      "elk.spacing.componentComponent": "60",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "60",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "30",
+      "elk.spacing.nodeNode": "25",
+      "elk.spacing.componentComponent": "50",
+      "elk.hierarchyHandling": "INCLUDE_CHILDREN",
       "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+      "elk.padding": "[top=25,left=20,bottom=20,right=20]",
     },
-    children: moduleNodes.map((m) => {
-      const isFile = fileEntries?.has(m.module_id) ?? false;
-      return {
-        id: m.module_id,
-        width: isFile ? FILE_NODE_WIDTH : MODULE_NODE_WIDTH,
-        height: isFile ? FILE_NODE_HEIGHT : MODULE_NODE_HEIGHT,
-        labels: [{ text: m.module_id }],
-      };
-    }),
+    children: rootChildren,
     edges: moduleEdges.map((e, i) => ({
       id: `me${i}`,
       sources: [e.source],
@@ -429,70 +455,20 @@ export async function layoutModuleGraph(
 
   const layout = await elk.layout(elkGraph);
 
-  const rfNodes: Node[] = (layout.children ?? []).map((child) => {
-    const apiNode = moduleNodes.find((m) => m.module_id === child.id)!;
-    const fileEntry = fileEntries?.get(child.id);
-    const isFile = !!fileEntry;
-    const label = child.id.split("/").pop() ?? child.id;
-
-    if (isFile) {
-      // Render as a FileNode
-      return {
-        id: child.id,
-        type: "fileNode",
-        position: { x: child.x ?? 0, y: child.y ?? 0 },
-        data: {
-          label,
-          fullPath: child.id,
-          language: fileEntry.language,
-          symbolCount: fileEntry.symbol_count,
-          pagerank: fileEntry.pagerank,
-          betweenness: fileEntry.betweenness,
-          communityId: fileEntry.community_id,
-          isTest: fileEntry.is_test,
-          isEntryPoint: fileEntry.is_entry_point,
-          hasDoc: fileEntry.has_doc,
-          ...("confidence_group" in fileEntry && { confidenceGroup: (fileEntry as Record<string, unknown>).confidence_group }),
-          ...("commit_count" in fileEntry && { commitCount: (fileEntry as Record<string, unknown>).commit_count }),
-        } satisfies FileNodeData,
-      };
+  const positions = new Map<string, { x: number; y: number }>();
+  const extractPositions = (node: ElkNode, ox = 0, oy = 0) => {
+    for (const child of node.children ?? []) {
+      const x = (child.x ?? 0) + ox;
+      const y = (child.y ?? 0) + oy;
+      if (child.id.startsWith("dir:")) {
+        extractPositions(child, x, y);
+      } else {
+        positions.set(child.id, { x, y });
+      }
     }
+  };
+  extractPositions(layout);
 
-    return {
-      id: child.id,
-      type: "moduleGroup",
-      position: { x: child.x ?? 0, y: child.y ?? 0 },
-      data: {
-        label,
-        fullPath: child.id,
-        fileCount: apiNode.file_count,
-        symbolCount: apiNode.symbol_count,
-        avgPagerank: apiNode.avg_pagerank,
-        docCoveragePct: apiNode.doc_coverage_pct,
-      } satisfies ModuleNodeData,
-    };
-  });
-
-  // Deduplicate module edges
-  const edgeMap = new Map<string, number>();
-  for (const e of moduleEdges) {
-    const key = `${e.source}→${e.target}`;
-    edgeMap.set(key, (edgeMap.get(key) ?? 0) + e.edge_count);
-  }
-
-  const rfEdges: Edge[] = Array.from(edgeMap.entries()).map(([key, count]) => {
-    const [source = "", target = ""] = key.split("→");
-    return {
-      id: key,
-      source,
-      target,
-      type: "dependency",
-      data: {
-        importedNames: [],
-        edgeCount: count,
-      } satisfies DependencyEdgeData,
-    };
-  });
-
-  return { nodes: rfNodes, edges: rfEdges };
+  return positions;
 }
+

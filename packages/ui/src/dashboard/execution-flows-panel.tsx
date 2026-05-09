@@ -1,15 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, ChevronDown } from "lucide-react";
+import { ChevronRight, ChevronDown, Workflow } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { cn } from "../lib/cn";
+import { EmptyState } from "../shared/empty-state";
 import type { ExecutionFlowEntry } from "@repowise-dev/types/graph";
 
 interface ExecutionFlowsPanelProps {
   flows: ExecutionFlowEntry[];
   repoId: string;
+  linkPrefix?: string;
 }
 
 function FlowRow({ flow }: { flow: ExecutionFlowEntry }) {
@@ -84,13 +86,31 @@ function FlowRow({ flow }: { flow: ExecutionFlowEntry }) {
   );
 }
 
-export function ExecutionFlowsPanel({ flows, repoId: _repoId }: ExecutionFlowsPanelProps) {
-  if (flows.length === 0) return null;
+export function ExecutionFlowsPanel({ flows, repoId, linkPrefix }: ExecutionFlowsPanelProps) {
+  const prefix = linkPrefix ?? `/repos/${repoId}`;
+  if (flows.length === 0) {
+    return (
+      <Card>
+        <CardContent className="p-0">
+          <EmptyState
+            icon={<Workflow className="h-8 w-8" />}
+            title="No execution flows"
+            description="No execution flow data is available for this repository."
+          />
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">Execution Flows</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm font-medium">Execution Flows</CardTitle>
+          <a href={`${prefix}/graph?viewMode=architecture`} className="text-[10px] text-[var(--color-accent-primary)] hover:underline">
+            View in Graph →
+          </a>
+        </div>
       </CardHeader>
       <CardContent className="p-0">
         <div className="divide-y divide-[var(--color-border-default)]">

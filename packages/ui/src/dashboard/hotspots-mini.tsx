@@ -1,11 +1,13 @@
 import { Flame } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { EmptyState } from "../shared/empty-state";
 import { truncatePath } from "../lib/format";
 import type { Hotspot } from "@repowise-dev/types/git";
 
 interface HotspotsMiniProps {
   hotspots: Hotspot[];
   repoId: string;
+  linkPrefix?: string;
 }
 
 function getChurnColor(percentile: number): string {
@@ -14,20 +16,19 @@ function getChurnColor(percentile: number): string {
   return "var(--color-accent-primary)";
 }
 
-export function HotspotsMini({ hotspots, repoId }: HotspotsMiniProps) {
+export function HotspotsMini({ hotspots, repoId, linkPrefix }: HotspotsMiniProps) {
+  const prefix = linkPrefix ?? `/repos/${repoId}`;
   const top = hotspots.slice(0, 5);
 
   if (top.length === 0) {
     return (
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Flame className="h-4 w-4 text-red-500" />
-            Top Hotspots
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <p className="text-xs text-[var(--color-text-tertiary)]">No hotspot data</p>
+        <CardContent className="p-0">
+          <EmptyState
+            icon={<Flame className="h-8 w-8" />}
+            title="No hotspot data"
+            description="No churn or complexity hotspots detected in this repository."
+          />
         </CardContent>
       </Card>
     );
@@ -42,7 +43,7 @@ export function HotspotsMini({ hotspots, repoId }: HotspotsMiniProps) {
             Top Hotspots
           </span>
           <a
-            href={`/repos/${repoId}/hotspots`}
+            href={`${prefix}/hotspots`}
             className="text-[10px] text-[var(--color-accent-primary)] hover:underline font-normal"
           >
             View all
@@ -52,7 +53,11 @@ export function HotspotsMini({ hotspots, repoId }: HotspotsMiniProps) {
       <CardContent className="pt-0">
         <div className="space-y-2">
           {top.map((h) => (
-            <div key={h.file_path} className="flex items-center gap-3">
+            <a
+              key={h.file_path}
+              href={`${prefix}/graph?node=${encodeURIComponent(h.file_path)}`}
+              className="flex items-center gap-3 -mx-2 px-2 py-0.5 rounded hover:bg-[var(--color-bg-elevated)] transition-colors"
+            >
               <div className="w-16 shrink-0">
                 <div className="h-1.5 rounded-full bg-[var(--color-bg-elevated)] overflow-hidden">
                   <div
@@ -75,7 +80,7 @@ export function HotspotsMini({ hotspots, repoId }: HotspotsMiniProps) {
                   {Math.round(h.churn_percentile)}%
                 </span>
               </div>
-            </div>
+            </a>
           ))}
         </div>
       </CardContent>
