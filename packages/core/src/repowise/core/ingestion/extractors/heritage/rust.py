@@ -17,7 +17,12 @@ def _extract_rust_heritage(
         type_node = def_node.child_by_field_name("type")
         if trait_node and type_node:
             trait_name = node_text(trait_node, src).strip().rsplit("::", 1)[-1]
+            if "<" in trait_name:
+                trait_name = trait_name[:trait_name.index("<")]
             type_name = node_text(type_node, src).strip()
+            # Strip generic parameters: "Sides<T>" → "Sides"
+            if "<" in type_name:
+                type_name = type_name[:type_name.index("<")]
             if trait_name and type_name:
                 out.append(
                     HeritageRelation(
@@ -45,7 +50,32 @@ def _extract_rust_heritage(
                         )
                     )
 
-    elif def_node.type in ("struct_item", "enum_item"):
+    # Extract trait bounds from where clauses on any item type.
+    # `impl<T> Foo for T where T: Debug + Clone` → Foo depends on Debug, Clone
+    if def_node.type in ("impl_item", "function_item", "struct_item", "enum_item", "trait_item"):
+        for child in def_node.children:
+            if child.type == "where_clause":
+                for predicate in child.children:
+                    if predicate.type == "where_predicate":
+                        bounds = predicate.child_by_field_name("bounds")
+                        if bounds:
+                            for bound_child in bounds.children:
+                                if bound_child.type in ("+", ":"):
+                                    continue
+                                bound_name = node_text(bound_child, src).strip().rsplit("::", 1)[-1]
+                                if "<" in bound_name:
+                                    bound_name = bound_name[:bound_name.index("<")]
+                                if bound_name and bound_name not in ("Sized", "Send", "Sync", "Unpin"):
+                                    out.append(
+                                        HeritageRelation(
+                                            child_name=name,
+                                            parent_name=bound_name,
+                                            kind="trait_bound",
+                                            line=line,
+                                        )
+                                    )
+
+    if def_node.type in ("struct_item", "enum_item"):
         # Walk preceding siblings for #[derive(Trait1, Trait2)]
         prev = def_node.prev_named_sibling
         while prev is not None and prev.type == "attribute_item":

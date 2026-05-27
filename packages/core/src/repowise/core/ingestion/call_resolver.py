@@ -61,6 +61,8 @@ class CallResolver:
         self,
         parsed_files: dict[str, ParsedFile],
         import_targets: dict[str, set[str]],
+        *,
+        repo_path: str | None = None,
     ) -> None:
         # Per-file symbol index: {file_path: {symbol_name: symbol_id}}
         self._file_symbols: dict[str, dict[str, str]] = {}
@@ -92,6 +94,10 @@ class CallResolver:
         # Keep reference for cross-language checks in Tier 3
         self._parsed_files = parsed_files
 
+        # Rust cross-crate resolution
+        self._repo_path = repo_path
+        self._rust_crate_src: dict[str, str] | None = None  # lazy
+
         self._build_indices(parsed_files)
         self._follow_barrel_exports()
 
@@ -100,14 +106,65 @@ class CallResolver:
 
         A barrel file imports a name and re-exports it without defining it
         locally (e.g., ``__init__.py`` with ``from .calculator import Calculator``).
-        When downstream code imports from the barrel, we follow one hop to
+        When downstream code imports from the barrel, we follow chains to
         find the actual defining file.
         """
+        # First pass: identify direct barrel origins
         for path, name_to_file in self._import_names.items():
             file_syms = self._file_symbols.get(path, {})
             for name, source_file in name_to_file.items():
                 if name not in file_syms:
                     self._barrel_origins[path][name] = source_file
+
+        # Also track Rust pub-use re-exports that use wildcard (*) bindings.
+        # When a file has `pub use foo::*`, all symbols from foo are
+        # transitively available through this file.
+        for path, parsed in self._parsed_files.items():
+            for imp in parsed.imports:
+                if not imp.is_reexport or not imp.resolved_file:
+                    continue
+                if imp.resolved_file.startswith("external:"):
+                    continue
+                resolved = imp.resolved_file
+                source_syms = self._file_symbols.get(resolved, {})
+                file_syms = self._file_symbols.get(path, {})
+                for sym_name in source_syms:
+                    if sym_name not in file_syms:
+                        self._barrel_origins[path][sym_name] = resolved
+
+        # Multi-hop: follow chains up to 5 hops
+        for _ in range(4):
+            changed = False
+            for path, origins in list(self._barrel_origins.items()):
+                for name, source in list(origins.items()):
+                    deeper = self._barrel_origins.get(source, {}).get(name)
+                    if deeper and deeper != source:
+                        origins[name] = deeper
+                        changed = True
+            if not changed:
+                break
+
+    def _get_rust_crate_src(self) -> dict[str, str]:
+        """Lazily build a mapping from normalised crate name to src/ dir."""
+        if self._rust_crate_src is not None:
+            return self._rust_crate_src
+        self._rust_crate_src = {}
+        if not self._repo_path:
+            return self._rust_crate_src
+        from .resolvers.rust_workspace import get_or_build_cargo_workspace_index
+
+        class _Ctx:
+            def __init__(self, rp, pf):
+                self.repo_path = rp
+                self.parsed_files = pf
+
+        ctx = _Ctx(self._repo_path, self._parsed_files)
+        ws = get_or_build_cargo_workspace_index(ctx)
+        if ws:
+            for crate in ws.crates:
+                normalized = crate.name.replace("-", "_")
+                self._rust_crate_src[normalized] = crate.src_dir
+        return self._rust_crate_src
 
     def _build_indices(self, parsed_files: dict[str, ParsedFile]) -> None:
         """Build all lookup indices from parsed file data."""
@@ -270,6 +327,16 @@ class CallResolver:
             if method_name in source_syms:
                 return ResolvedCall(caller_id, source_syms[method_name], 0.88, call.line)
 
+        # Strategy 1c: Rust crate-scoped reference (e.g. typst_html::module)
+        # The receiver is a crate name, the target is a symbol in that crate's lib.rs
+        crate_src = self._get_rust_crate_src().get(receiver_name)
+        if crate_src:
+            for root_file in ("lib.rs", "main.rs"):
+                crate_root = f"{crate_src}/{root_file}"
+                root_syms = self._file_symbols.get(crate_root, {})
+                if method_name in root_syms:
+                    return ResolvedCall(caller_id, root_syms[method_name], 0.88, call.line)
+
         # Strategy 2: receiver is a known class name → look for method on that class
         # Check same-file classes first
         file_methods = self._file_methods.get(file_path, {})
@@ -284,6 +351,15 @@ class CallResolver:
             imp_methods = self._file_methods.get(imported_file, {})
             if key in imp_methods:
                 return ResolvedCall(caller_id, imp_methods[key], 0.88, call.line)
+
+        # Strategy 2b: trait method dispatch — receiver is a type that
+        # implements a trait; the method may be defined on the trait's
+        # impl block in another file.
+        for _path, methods in self._file_methods.items():
+            if _path == file_path:
+                continue
+            if key in methods:
+                return ResolvedCall(caller_id, methods[key], 0.75, call.line)
 
         # Strategy 3: receiver is "self" or "this" — look in same class
         if receiver_name in ("self", "this"):

@@ -73,6 +73,41 @@ _DYNAMIC_IMPORT_MARKERS: dict[str, tuple[str, ...]] = {
         "runtimeMirror(",
         "reflect.runtime",
     ),
+    ".rs": (
+        # Trait object construction (runtime dispatch)
+        "Box<dyn ",
+        "Arc<dyn ",
+        "Rc<dyn ",
+        "&dyn ",
+        # FFI exports (called from C, no Rust callers)
+        '#[no_mangle]',
+        'extern "C"',
+        # Plugin/inventory registration (resolved at link time)
+        "inventory::submit!",
+        "linkme::distributed_slice!",
+        # Dynamic dispatch through function pointers
+        "Box::new(",
+        "Arc::new(",
+        # Serde (generates field access code)
+        '#[derive(Serialize',
+        '#[derive(Deserialize',
+        '#[serde(',
+        # Conditional compilation
+        '#[cfg(target_',
+        '#[cfg(feature',
+        # Proc-macro registration (called by the compiler, not by user code)
+        '#[proc_macro]',
+        '#[proc_macro_derive',
+        '#[proc_macro_attribute',
+        # Doc-hidden items are intentionally not part of the public API surface
+        # but may still be used by downstream crates or macros via re-exports.
+        '#[doc(hidden)]',
+        # Explicitly suppressed warnings — the author knows it looks unused.
+        '#[allow(dead_code)]',
+        '#[allow(unused)]',
+        # Deprecated items are intentionally present but winding down.
+        '#[deprecated',
+    ),
     ".cs": (
         # Reflection-driven type loading
         "Type.GetType(",

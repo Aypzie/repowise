@@ -24,6 +24,7 @@ Capture-name conventions (shared across ALL .scm files):
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -379,6 +380,22 @@ class ASTParser:
                 for sibling in def_node.parent.children:
                     if sibling.type == "decorator":
                         modifier_texts.append(_node_text(sibling, src))
+
+            # Rust: outer attributes (#[...]) are preceding siblings of the item
+            rust_attrs: list[str] = []
+            if file_info.language == "rust" and def_node.parent is not None:
+                siblings = def_node.parent.children
+                for j, sib in enumerate(siblings):
+                    if sib.id == def_node.id:
+                        k = j - 1
+                        while k >= 0 and siblings[k].type == "attribute_item":
+                            attr_text = _node_text(siblings[k], src).strip()
+                            # Strip #[ and ] to get the inner attribute text
+                            if attr_text.startswith("#[") and attr_text.endswith("]"):
+                                rust_attrs.append(attr_text[2:-1])
+                            k -= 1
+                        break
+
             visibility = config.visibility_fn(name, modifier_texts)
             is_exported_symbol = False
             # C/C++ visibility is dictated by AST context (access
@@ -428,7 +445,7 @@ class ASTParser:
                     start_line=start_line,
                     end_line=def_node.end_point[0] + 1,
                     docstring=docstring,
-                    decorators=[m for m in modifier_texts if m.startswith("@")],
+                    decorators=[m for m in modifier_texts if m.startswith("@")] + rust_attrs,
                     visibility=visibility,  # type: ignore[arg-type]
                     is_async=is_async,
                     language=file_info.language,
@@ -462,6 +479,16 @@ class ASTParser:
                         ancestor.child_by_field_name("type")  # Rust impl_item
                     )
                     if name_node:
+                        # For Rust impl blocks with generic types (e.g. impl<T> Foo<T>),
+                        # extract only the base type name, not the full generic signature.
+                        if name_node.type == "generic_type":
+                            inner = name_node.child_by_field_name("type")
+                            if inner and inner.type == "type_identifier":
+                                name_node = inner
+                        elif name_node.type == "scoped_type_identifier":
+                            inner = name_node.child_by_field_name("name")
+                            if inner and inner.type == "type_identifier":
+                                name_node = inner
                         return _node_text(name_node, src)
                 ancestor = ancestor.parent
             return None
@@ -503,9 +530,39 @@ class ASTParser:
             if not module_text:
                 continue
 
+            # Rust #[path = "..."] attribute overrides module file location.
+            # In tree-sitter-rust, outer attributes are preceding siblings of
+            # the item, not children.
+            if file_info.language == "rust" and stmt_node.type == "mod_item":
+                parent = stmt_node.parent
+                if parent is not None:
+                    siblings = parent.children
+                    for j, sib in enumerate(siblings):
+                        if sib.id == stmt_node.id:
+                            # Walk backward through preceding attribute_item siblings
+                            k = j - 1
+                            while k >= 0 and siblings[k].type == "attribute_item":
+                                attr_text = _node_text(siblings[k], src)
+                                path_match = re.search(r'path\s*=\s*"([^"]+)"', attr_text)
+                                if path_match:
+                                    module_text = path_match.group(1)
+                                    break
+                                k -= 1
+                            break
+
             # Language-specific import name + binding extraction
             imported_names, bindings = extract_import_bindings(stmt_node, src, file_info.language)
-            is_relative = module_text.startswith(".") or module_text.startswith("./")
+            is_relative = (
+                module_text.startswith(".") or module_text.startswith("./")
+                or module_text.startswith(("self::", "super::", "crate::"))
+            )
+
+            is_reexport = False
+            if file_info.language == "rust" and stmt_node.type == "use_declaration":
+                for child in stmt_node.children:
+                    if child.type == "visibility_modifier":
+                        is_reexport = True
+                        break
 
             imports.append(
                 Import(
@@ -515,6 +572,7 @@ class ASTParser:
                     is_relative=is_relative,
                     resolved_file=None,
                     bindings=bindings,
+                    is_reexport=is_reexport,
                 )
             )
 

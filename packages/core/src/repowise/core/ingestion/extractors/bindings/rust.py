@@ -9,7 +9,31 @@ from ..helpers import node_text
 
 
 def extract_rust_bindings(stmt_node: Node, src: str) -> tuple[list[str], list[NamedBinding]]:
-    """Extract bindings from Rust use declarations."""
+    """Extract bindings from Rust use declarations and mod items."""
+    # `mod foo;` (without body) declares a child module — treat as wildcard
+    # import because all public symbols become accessible via `foo::Name`.
+    if stmt_node.type == "mod_item":
+        return ["*"], [NamedBinding(local_name="*", exported_name=None, source_file=None)]
+
+    # `extern crate foo;` or `extern crate foo as bar;`
+    if stmt_node.type == "extern_crate_declaration":
+        alias_node = stmt_node.child_by_field_name("alias")
+        name_node = stmt_node.child_by_field_name("name")
+        if alias_node:
+            local = node_text(alias_node, src)
+            exported = node_text(name_node, src) if name_node else local
+            return [local], [NamedBinding(
+                local_name=local, exported_name=exported,
+                source_file=None, is_module_alias=True,
+            )]
+        elif name_node:
+            name = node_text(name_node, src)
+            return [name], [NamedBinding(
+                local_name=name, exported_name=name,
+                source_file=None, is_module_alias=True,
+            )]
+        return ["*"], [NamedBinding(local_name="*", exported_name=None, source_file=None)]
+
     arg_node = stmt_node.child_by_field_name("argument")
     if arg_node is None:
         for child in stmt_node.children:
