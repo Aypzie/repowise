@@ -1,7 +1,7 @@
 # =============================================================================
 # repowise — multi-stage Docker build (backend + frontend)
 # =============================================================================
-FROM node:20-alpine AS frontend-builder
+FROM node:20-bookworm-slim AS frontend-builder
 
 WORKDIR /app
 
