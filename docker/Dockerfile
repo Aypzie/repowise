@@ -36,7 +36,9 @@ RUN cp -r /app/web-root/packages/web /app/web && rm -rf /app/web-root
 COPY --from=frontend-builder /app/packages/web/.next/static /app/web/.next/static
 COPY --from=frontend-builder /app/packages/web/public /app/web/public
 
-RUN pip install nodeenv && nodeenv -p --node=20.20.2
+COPY --from=frontend-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-builder /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=frontend-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 RUN npm install --prefix /app/web --omit=dev
 
