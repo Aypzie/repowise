@@ -52,7 +52,7 @@ EXPOSE 7337 3000
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN groupadd -r repowise && useradd -r -g repowise -d /app -s /sbin/nologin repowise     && chown -R repowise:repowise /app /data
+RUN mkdir -p /data && groupadd -r repowise && useradd -r -g repowise -d /app -s /sbin/nologin repowise     && chown -R repowise:repowise /app /data
 USER repowise
 
 ENTRYPOINT ["/app/entrypoint.sh"]
