@@ -23,10 +23,6 @@ FROM python:3.12-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends     git     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=frontend-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=frontend-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
-
 WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE MANIFEST.in ./
@@ -35,11 +31,12 @@ COPY packages/cli/ packages/cli/
 COPY packages/server/ packages/server/
 RUN pip install --no-cache-dir ".[all]"
 
-COPY --from=frontend-builder /app/packages/web/.next/standalone/packages/web/server.js /app/web/server.js
-COPY --from=frontend-builder /app/packages/web/.next/standalone/packages/web/package.json /app/web/package.json
-COPY --from=frontend-builder /app/packages/web/.next/standalone/node_modules /app/web/node_modules
+COPY --from=frontend-builder /app/packages/web/.next/standalone /app/web-root
+RUN cp -r /app/web-root/packages/web /app/web && rm -rf /app/web-root
 COPY --from=frontend-builder /app/packages/web/.next/static /app/web/.next/static
 COPY --from=frontend-builder /app/packages/web/public /app/web/public
+
+RUN npm install --prefix /app/web --omit=dev
 
 VOLUME /data
 
