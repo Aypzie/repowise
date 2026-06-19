@@ -35,7 +35,9 @@ COPY packages/cli/ packages/cli/
 COPY packages/server/ packages/server/
 RUN pip install --no-cache-dir ".[all]"
 
-COPY --from=frontend-builder /app/packages/web/.next/standalone /app/web
+COPY --from=frontend-builder /app/packages/web/.next/standalone/packages/web/server.js /app/web/server.js
+COPY --from=frontend-builder /app/packages/web/.next/standalone/packages/web/package.json /app/web/package.json
+COPY --from=frontend-builder /app/packages/web/.next/standalone/node_modules /app/web/node_modules
 COPY --from=frontend-builder /app/packages/web/.next/static /app/web/.next/static
 COPY --from=frontend-builder /app/packages/web/public /app/web/public
 
