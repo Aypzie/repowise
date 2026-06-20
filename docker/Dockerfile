@@ -21,7 +21,7 @@ RUN npm run build
 
 FROM python:3.12-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     ca-certificates     gnupg     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     wget     ca-certificates     gnupg     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
