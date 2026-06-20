@@ -10,7 +10,7 @@ uvicorn repowise.server.app:create_app \
 
 # Start the Next.js frontend
 echo "Starting repowise Web UI on port ${PORT_FRONTEND}..."
-cd /app/web
+cd /app/web/packages/web
 REPOWISE_API_URL="http://localhost:${PORT_BACKEND}" \
 HOSTNAME="0.0.0.0" \
 PORT="${PORT_FRONTEND}" \
