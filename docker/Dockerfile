@@ -31,12 +31,9 @@ COPY packages/cli/ packages/cli/
 COPY packages/server/ packages/server/
 RUN pip install --no-cache-dir ".[all]"
 
-COPY --from=frontend-builder /app/packages/web/.next/standalone /app/web-root
-RUN cp -r /app/web-root/packages/web /app/web && rm -rf /app/web-root
-COPY --from=frontend-builder /app/packages/web/.next/static /app/web/.next/static
-COPY --from=frontend-builder /app/packages/web/public /app/web/public
-
-RUN npm install --prefix /app/web --omit=dev
+COPY --from=frontend-builder /app/packages/web/.next/standalone /app/web
+COPY --from=frontend-builder /app/packages/web/.next/static /app/web/packages/web/.next/static
+COPY --from=frontend-builder /app/packages/web/public /app/web/packages/web/public
 
 VOLUME /data
 
