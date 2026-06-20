@@ -22,6 +22,10 @@ FROM python:3.12-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     wget     ca-certificates     gnupg     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
 
+RUN curl -fsSL https://opencode.ai/install | bash \
+    && cp /root/.opencode/bin/opencode /usr/local/bin/opencode \
+    && opencode --version
+
 WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE MANIFEST.in ./
