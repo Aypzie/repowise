@@ -16,7 +16,6 @@ COPY packages/ui/ packages/ui/
 COPY packages/web/ packages/web/
 
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV NEXT_PUBLIC_REPOWISE_API_URL=http://localhost:7337
 RUN npm run build
 
 FROM python:3.12-slim AS runtime
