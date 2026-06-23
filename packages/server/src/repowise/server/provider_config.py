@@ -69,6 +69,14 @@ PROVIDER_CATALOG: list[dict[str, Any]] = [
         "requires_key": True,
     },
     {
+        "id": "kimi",
+        "name": "Kimi (Moonshot)",
+        "default_model": "kimi-k2.7-code",
+        "models": ["kimi-k2.7-code"],
+        "env_keys": ["KIMI_API_KEY"],
+        "requires_key": True,
+    },
+    {
         "id": "ollama",
         "name": "Ollama (Local)",
         "default_model": "llama3.2",
@@ -140,6 +148,7 @@ _BASE_URL_ENV_VARS = {
     "gemini": ["GEMINI_BASE_URL"],
     "ollama": ["OLLAMA_BASE_URL"],
     "deepseek": ["DEEPSEEK_BASE_URL"],
+    "kimi": ["KIMI_BASE_URL"],
     "litellm": ["LITELLM_BASE_URL", "LITELLM_API_BASE"],
 }
 
