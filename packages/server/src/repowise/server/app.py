@@ -47,6 +47,8 @@ from repowise.server.routers import (
     health,
     jobs,
     knowledge_map,
+    mcp,
+    meta,
     modules,
     overview,
     owners,
@@ -55,6 +57,7 @@ from repowise.server.routers import (
     repos,
     search,
     security,
+    stats,
     symbols,
     webhooks,
     workspace,
@@ -407,6 +410,8 @@ def create_app() -> FastAPI:
     app.include_router(decisions.router)
     app.include_router(chat.router)
     app.include_router(providers.router)
+    app.include_router(mcp.router)
+    app.include_router(meta.router)
     app.include_router(costs.router)
     app.include_router(security.router)
     app.include_router(blast_radius.router)
@@ -415,6 +420,7 @@ def create_app() -> FastAPI:
     app.include_router(owners.router)
     app.include_router(modules.router)
     app.include_router(overview.router)
+    app.include_router(stats.router)
     app.include_router(files.router)
     app.include_router(external_systems.router)
 

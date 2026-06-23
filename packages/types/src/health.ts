@@ -15,8 +15,59 @@
  * cutoffs anywhere else — derive from these consts or read the API `band`.
  */
 
+import type { C4IoKind } from "./external-systems.js";
+
 /** Finding severity used across the health surface. */
 export type HealthSeverity = "low" | "medium" | "high" | "critical";
+
+/* ------------------------------------------------------------------ *
+ * Health dimensions (the three-signal split)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The orthogonal health signals. `defect` is the historical, calibrated score
+ * surfaced as the overall number; `maintainability` is a co-surfaced signal
+ * made of the smells the defect calibration floors (they don't predict bugs, so
+ * they get a proper home here instead of diluting the defect score);
+ * `performance` is the co-surfaced third signal: static performance RISK
+ * (I/O-in-loop / N+1 shapes that waste work). All three are co-equal views; the
+ * overall number stays the defect score and is never a blend.
+ *
+ * Mirror of `DIMENSIONS` in
+ * `packages/core/src/repowise/core/analysis/health/scoring.py`, kept in sync by
+ * a parity test (`__tests__/health.test.ts` here,
+ * `tests/unit/health/test_scoring_dimensions.py` in core).
+ */
+export type HealthDimension = "defect" | "maintainability" | "performance";
+
+/** Canonical dimension order (parity-locked against core's `DIMENSIONS`). */
+export const HEALTH_DIMENSIONS: readonly HealthDimension[] = [
+  "defect",
+  "maintainability",
+  "performance",
+] as const;
+
+/** Display labels for the dimensions surfaced today. */
+export const HEALTH_DIMENSION_LABEL: Record<HealthDimension, string> = {
+  defect: "Defect risk",
+  maintainability: "Maintainability",
+  performance: "Performance",
+};
+
+/**
+ * Human-readable labels for the I/O-boundary kind a performance finding crosses
+ * (the `boundary_kind` on an `io_in_loop` finding's `details`). The kind set is
+ * the canonical `C4IoKind` from `external-systems.ts`, parity-locked against the
+ * Python `IO_KINDS` classifier; this only adds display strings, no new wire
+ * enum. Used to render "a database call runs once per loop iteration" detail.
+ */
+export const PERF_BOUNDARY_LABEL: Record<C4IoKind, string> = {
+  db: "Database",
+  network: "Network",
+  filesystem: "Filesystem",
+  subprocess: "Subprocess",
+  lock: "Lock",
+};
 
 /* ------------------------------------------------------------------ *
  * Band "currency" layer
@@ -116,6 +167,17 @@ export interface HealthFileMetric {
   line_coverage_pct: number | null;
   module: string | null;
   duplication_pct?: number | null;
+  /**
+   * Per-dimension scores from the three-signal split. `score` stays the overall
+   * surfaced number (== `defect_score` until a deliberate blend decision).
+   * `maintainability_score` is the co-surfaced second signal;
+   * `performance_score` is computed but not yet surfaced as its own pillar
+   * (`null` on payloads that predate the performance detectors). All optional so
+   * older payloads parse unchanged.
+   */
+  defect_score?: number | null;
+  maintainability_score?: number | null;
+  performance_score?: number | null;
 }
 
 export interface HealthFinding {
@@ -132,6 +194,12 @@ export interface HealthFinding {
   status: string;
   /** Matching symbol id when the finding names a function; links to the symbol page. */
   symbol_id?: string | null;
+  /**
+   * The finding's "home" health dimension (`defect` / `maintainability` /
+   * `performance`), used to filter findings by pillar. Optional/`defect` when an
+   * older payload omits it.
+   */
+  dimension?: HealthDimension;
 }
 
 export interface HealthModuleRow {
@@ -166,6 +234,30 @@ export interface HealthOverviewSummary {
   severity_breakdown?: { critical: number; high: number; medium: number; low: number };
   /** Repo-level band derived from `average_health` (added in the band/distribution layer). */
   band?: HealthBand;
+  /**
+   * NLOC-weighted repo headline for the maintainability pillar (the second
+   * surfaced signal). `null`/absent when no file carries a maintainability
+   * score. `maintainability_hotspot` is the same average restricted to hotspot
+   * files, when available.
+   */
+  maintainability_average?: number | null;
+  maintainability_hotspot?: number | null;
+  /**
+   * NLOC-weighted repo headline for the performance pillar (the third surfaced
+   * signal: static performance RISK, not measured runtime). `null`/absent when
+   * no file carries a performance score. `performance_hotspot` is the same
+   * average restricted to hotspot files, when available.
+   */
+  performance_average?: number | null;
+  performance_hotspot?: number | null;
+  /** Open findings homing under the maintainability / performance pillars — the
+   *  per-pillar actionable counts. Absent on payloads predating the split. */
+  maintainability_findings?: number;
+  performance_findings?: number;
+  /** Lowest-scoring file by performance risk, surfaced only when score < 10
+   *  (a clean repo returns `null` rather than a misleading "worst" at 10.0). */
+  worst_performance_path?: string | null;
+  worst_performance_score?: number | null;
 }
 
 export interface HealthOverviewResponse {

@@ -65,7 +65,16 @@ def _finding_to_dict(f: Any) -> dict:
         "reason": f.reason,
         "details": details,
         "status": f.status,
+        # Pillar the finding homes under (defect / maintainability / performance)
+        # so the UI can filter findings per dimension. Defaults to defect for
+        # rows that predate the split.
+        "dimension": getattr(f, "dimension", None) or "defect",
     }
+
+
+def _round_opt(v: Any) -> float | None:
+    """Round a nullable per-dimension score, preserving ``None`` (not measured)."""
+    return round(v, 2) if v is not None else None
 
 
 def _metric_to_dict(m: Any) -> dict:
@@ -79,6 +88,12 @@ def _metric_to_dict(m: Any) -> dict:
         "line_coverage_pct": m.line_coverage_pct,
         "module": m.module,
         "duplication_pct": getattr(m, "duplication_pct", None),
+        # Per-dimension scores from the three-signal split. ``score`` above stays
+        # the overall surfaced number (== defect_score for now).
+        # ``performance_score`` is computed but not yet surfaced as its own pillar.
+        "defect_score": _round_opt(getattr(m, "defect_score", None)),
+        "maintainability_score": _round_opt(getattr(m, "maintainability_score", None)),
+        "performance_score": _round_opt(getattr(m, "performance_score", None)),
     }
 
 
@@ -445,6 +460,7 @@ async def list_health_findings(
     biomarker_type: str | None = Query(None),
     file_path: str | None = Query(None),
     min_severity: str | None = Query(None),
+    dimension: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> list[dict]:
@@ -454,6 +470,7 @@ async def list_health_findings(
         biomarker_type=biomarker_type,
         file_path=file_path,
         min_severity=min_severity,
+        dimension=dimension,
     )
     return await _attach_symbol_ids(
         session, repo_id, [_finding_to_dict(f) for f in findings[:limit]]

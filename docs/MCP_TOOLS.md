@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-repowise exposes 9 tools via the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). These tools give AI coding assistants (Claude Code, Codex, Cursor, Cline, Windsurf) structured access to your codebase intelligence — dependency graph, git history, documentation, and architectural decisions.
+repowise exposes a curated set of tools via the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). These tools give AI coding assistants (Claude Code, Codex, Cursor, Cline, Windsurf) structured access to your codebase intelligence — dependency graph, git history, documentation, and architectural decisions. A single-repo server advertises 10 tools by default; workspace mode adds 3 more automatically. The surface is configurable — see [Configuring the tool surface](#configuring-the-tool-surface).
 
 **Start the MCP server:**
 
@@ -22,14 +22,55 @@ repowise mcp --transport sse --port 7338 # legacy SSE transport
 | `get_answer` | One-call RAG Q&A | First call on any code question |
 | `get_context` | Rich context for targets | Before reading or modifying code |
 | `get_symbol` | Raw source bytes for one symbol | When you need one function/class body |
-| `search_codebase` | Semantic search | Discovering code by topic |
+| `search_codebase` | Hybrid symbol / path / concept search | Finding a symbol or file, or discovering code by topic |
 | `get_risk` | Modification risk | Before changing hotspot files |
 | `get_why` | Architectural decisions | Before structural changes |
 | `get_dead_code` | Unreachable code | Cleanup tasks |
 | `get_health` | Code-health biomarker scores | Before refactoring — find the worst files |
+| `list_repos` | List the repos a server is serving | Discovering workspace repo aliases |
 | `get_blast_radius` | Cross-repo downstream impact (workspace only) | Before changing a service other repos consume |
 | `get_conformance` | Architecture rule violations + cycles (workspace only) | Auditing or before changing service boundaries |
 | `get_architecture` | System coupling, cyclic core, 1-10 architecture score (workspace only) | Gauging overall structure before a cross-service refactor |
+
+Two further tools are **off by default** and opt-in (see below): `get_dependency_path` (shortest dependency path between two symbols/files) and `get_execution_flows` (top entry points and their call traces).
+
+---
+
+## Configuring the tool surface
+
+The default surface is deliberately small — fewer, richer tools mean fewer round-trips and less schema overhead per task. What a server advertises is resolved from three things: each tool's defaults, whether the server is in workspace mode, and an optional override.
+
+- **Default (single-repo):** the 10 tools above (every tool except the workspace-only three).
+- **Default (workspace):** those 10 plus `get_blast_radius`, `get_conformance`, and `get_architecture`, which are added automatically when the server is started inside a workspace. They are never advertised outside one.
+- **Opt-in tools:** `get_dependency_path` and `get_execution_flows` are registered but off by default. Turn them on per repo.
+
+**Configure it in `.repowise/config.yaml`** under an `mcp.tools` key. Two shapes are supported:
+
+```yaml
+# Adjust the default set with + / - deltas (the common case):
+mcp:
+  tools: ["+get_execution_flows", "-get_dead_code"]
+
+# Or give an explicit allowlist (only these tools):
+mcp:
+  tools: ["get_answer", "get_context", "get_symbol", "search_codebase"]
+
+# Or enable everything available in the current mode:
+mcp:
+  tools: all
+```
+
+**Or per launch on the CLI**, which overrides the config block:
+
+```bash
+repowise mcp --tools "+get_execution_flows"          # default set plus one
+repowise mcp --tools "get_answer,get_context"         # explicit allowlist
+repowise mcp --all                                    # every available tool
+```
+
+Workspace-only tools named explicitly in single-repo mode are ignored (they cannot do useful work there). Unknown tool names are ignored with a warning.
+
+**Or from the dashboard:** the Settings page lists every tool with its description and a per-repo toggle, and writes the same `mcp.tools` config for you.
 
 ---
 
@@ -177,25 +218,52 @@ get_symbol(symbol_id="repowise#a1b2c3d4e5f6", query="FAILED")
 
 ## `search_codebase`
 
-Semantic search over the full wiki. Natural language queries.
+Hybrid code search over RepoWise's indexes. A single tool that, depending on
+the shape of the query, searches the indexed **symbols**, **file paths**, or
+the **wiki** — instead of forcing a fallback to Grep for identifiers.
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | Yes | Natural language search query |
+| `query` | string | Yes | Identifier, path, or natural-language query |
+| `limit` | int | No | Max results (default 5) |
+| `mode` | string | No | `auto` (default) \| `concept` \| `symbol` \| `path` \| `hybrid` |
+| `kind` | string | No | `implementation` \| `test` \| `config` \| `doc` |
+| `symbol_kind` | string | No | Restrict symbol hits by kind (`function`, `class`, `method`, …) |
+| `page_type` | string | No | `file_page` \| `module_page` \| `symbol_spotlight` (concept mode) |
 | `repo` | string | No | *(workspace only)* Target repo alias, or `"all"` to search across workspace |
 
-**Returns:** Ranked wiki pages with relevance scores, snippets, and file paths.
+**Modes:**
 
-**When to use:** When `get_answer` returned low confidence and you need to discover candidate pages by topic. Also useful for broad exploration ("how do we handle retries?", "payment processing flow").
+- **`auto`** (default) routes by query shape:
+  - an **identifier** (`GitIndexer`, `index_repo`) → searches indexed symbols;
+  - a **path** (`core/ingestion/indexer.py`) → searches file pages;
+  - **prose** ("how do we handle retries?") → wiki-semantic search;
+  - mixed prose + identifier → **hybrid** (symbol hits first, then concept pages).
+- **`concept`** forces the original wiki-semantic behavior.
+- **`symbol`** / **`path`** force the structural search.
 
-In workspace mode, searches across all repos and merges results.
+**Returns:**
 
-**Example call:**
+- *Symbol hits* — `{type: "symbol", symbol_id, name, kind, file, start_line, end_line, signature, next: "get_symbol"}`. Ranked by exact-name/qualified-name match, query-token coverage, then graph centrality (PageRank / betweenness / entry-point); non-test before test unless `kind="test"`.
+- *File hits* — `{type: "file", page_id, file, title, next: "get_context"}`.
+- *Concept hits* — ranked wiki pages with `relevance_score`, `snippet`, `target_path`, and a `search_method` (`embedding` vs `bm25` fallback).
+
+Tombstoned and `exclude_patterns`-excluded results are filtered. In workspace
+mode, structural and concept searches both federate across repos and merge.
+
+**When to use:** Locating a function/class/method by name, resolving a
+path-shaped query, or discovering pages by topic — the symbol/file shapes pipe
+directly into `get_symbol` / `get_context`.
+
+**Example calls:**
 
 ```
-search_codebase(query="rate limit OR throttle OR retry")
+search_codebase(query="GitIndexer index_repo")          # → symbol hits
+search_codebase(query="core/ingestion/indexer.py")      # → file hits
+search_codebase(query="rate limit OR throttle OR retry") # → wiki pages
+search_codebase(query="login", mode="symbol", symbol_kind="method")
 ```
 
 ---

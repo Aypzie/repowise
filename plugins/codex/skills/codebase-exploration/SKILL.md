@@ -13,17 +13,13 @@ Call `get_overview()` first. It returns the architecture summary, module map, en
 
 ## Answering How Or Where Questions
 
-1. Call `search_codebase(query="topic or symbol")` to find relevant documented modules and files.
+1. Call `search_codebase(query="topic, symbol, or path")`. It auto-routes: an identifier returns indexed symbol hits (`symbol_id` + line bounds — pipe into `get_symbol`), a path returns file pages, and prose runs semantic search. Force a branch with `mode=symbol|path|concept|hybrid`.
 2. Call `get_context(targets=[...])` with all relevant files from the search results in one batch.
 3. Read raw source only after the indexed context is not specific enough for the user’s question.
 
 ## Understanding Connections Between Modules
 
-Call `get_dependency_path(source="module_a", target="module_b")` when the user asks how two areas connect.
-
-## Getting Diagrams
-
-Call `get_architecture_diagram(scope="module", path="path/to/module")` for a subsystem diagram, or `get_architecture_diagram()` for the full repository.
+Call `get_context(targets=["path/or/symbol"], include=["callers", "callees"])` when the user asks how two areas connect, then follow the callers and callees it returns.
 
 ## Error Handling
 

@@ -36,8 +36,15 @@ from .biomarkers.base import HasEdge
 from .complexity import FileComplexity, FunctionComplexity, walk_file
 from .coverage import is_test_file as _coverage_is_test_file
 from .duplication import DuplicationReport, detect_clones
-from .models import HealthFileMetricData, HealthFindingData, HealthReport
-from .scoring import attach_impacts, compute_kpis, score_file
+from .models import HealthFileMetricData, HealthFindingData, HealthReport, Severity
+from .perf import (
+    CallGraphIndex,
+    PerfRanker,
+    collect_blocking_io_under_lock,
+    collect_centrality_gated,
+    collect_crossfn_io_in_loop,
+)
+from .scoring import attach_impacts, compute_kpis, remap_severities, score_file
 
 log = structlog.get_logger(__name__)
 
@@ -307,6 +314,10 @@ class HealthAnalyzer:
         cfg = config or {}
         disabled: list[str] = list(cfg.get("disabled_biomarkers", ()))
         per_file_disabled: dict[str, set[str]] = cfg.get("per_file_disabled", {}) or {}
+        repo_severity_overrides: dict[str, Severity] = cfg.get("severity_overrides", {}) or {}
+        per_file_severity_overrides: dict[str, dict[str, Severity]] = (
+            cfg.get("per_file_severity_overrides", {}) or {}
+        )
         changed_set: set[str] | None = set(changed_files) if changed_files is not None else None
 
         # PageRank is optional — graph_builder.symbol_pagerank exists but
@@ -362,6 +373,9 @@ class HealthAnalyzer:
         repo_dependents_p80 = _compute_repo_dependents_p80(self.parsed_files, self.graph)
         repo_active_contributors = _compute_repo_active_contributors(self.git_meta_map)
 
+        # Cross-function N+1: augment perf_hits before the biomarker stage.
+        self._apply_crossfn_perf(walked)
+
         for pf, fcx in walked:
             # Side-effect: bump Symbol.complexity_estimate when we can
             # match by enclosing line range. Symbols not matched keep
@@ -374,6 +388,8 @@ class HealthAnalyzer:
                 for name in extra:
                     if name not in file_disabled:
                         file_disabled.append(name)
+            file_severity_overrides = dict(repo_severity_overrides)
+            file_severity_overrides.update(per_file_severity_overrides.get(pf.file_info.path, {}))
             file_metric, file_findings = self._evaluate_file(
                 pf,
                 fcx,
@@ -385,6 +401,7 @@ class HealthAnalyzer:
                 repo_function_mod_p80=repo_fn_mod_p80,
                 repo_dependents_p80=repo_dependents_p80,
                 repo_active_contributors_90d=repo_active_contributors,
+                severity_overrides=file_severity_overrides or None,
             )
             metrics.append(file_metric)
             findings.extend(file_findings)
@@ -433,6 +450,10 @@ class HealthAnalyzer:
         cfg = config or {}
         disabled: list[str] = list(cfg.get("disabled_biomarkers", ()))
         per_file_disabled: dict[str, set[str]] = cfg.get("per_file_disabled", {}) or {}
+        repo_severity_overrides: dict[str, Severity] = cfg.get("severity_overrides", {}) or {}
+        per_file_severity_overrides: dict[str, dict[str, Severity]] = (
+            cfg.get("per_file_severity_overrides", {}) or {}
+        )
         changed_set: set[str] | None = set(changed_files) if changed_files is not None else None
 
         path_basenames = _path_basenames({pf.file_info.path for pf in self.parsed_files})
@@ -505,6 +526,10 @@ class HealthAnalyzer:
         repo_dependents_p80 = _compute_repo_dependents_p80(self.parsed_files, self.graph)
         repo_active_contributors = _compute_repo_active_contributors(self.git_meta_map)
 
+        # Cross-function N+1: augment perf_hits before the biomarker stage.
+        walked = list(walked)
+        self._apply_crossfn_perf(walked)
+
         findings: list[HealthFindingData] = []
         metrics: list[HealthFileMetricData] = []
         for pf, fcx in walked:
@@ -515,6 +540,8 @@ class HealthAnalyzer:
                 for name in extra:
                     if name not in file_disabled:
                         file_disabled.append(name)
+            file_severity_overrides = dict(repo_severity_overrides)
+            file_severity_overrides.update(per_file_severity_overrides.get(pf.file_info.path, {}))
             file_metric, file_findings = self._evaluate_file(
                 pf,
                 fcx,
@@ -526,6 +553,7 @@ class HealthAnalyzer:
                 repo_function_mod_p80=repo_fn_mod_p80,
                 repo_dependents_p80=repo_dependents_p80,
                 repo_active_contributors_90d=repo_active_contributors,
+                severity_overrides=file_severity_overrides or None,
             )
             metrics.append(file_metric)
             findings.extend(file_findings)
@@ -550,6 +578,47 @@ class HealthAnalyzer:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _apply_crossfn_perf(self, walked: list[tuple[Any, FileComplexity]]) -> None:
+        """Run the graph-dependent perf passes over the walked files, in place.
+
+        Four sources of extra ``perf_hits``, all sharing one
+        :class:`CallGraphIndex` (built once over the resolved ``calls`` graph):
+
+          1. cross-function ``io_in_loop`` / N+1 (PR4);
+          2. cross-function ``blocking_io_under_lock`` (Phase 7b) — the lock→I/O
+             reachability case;
+          3. the centrality-gated ``nested_loop_quadratic`` / ``hot_path_sync_io``
+             markers (Phase 7b), generated from the walker's per-function facts
+             ONLY for a hot function, via the :class:`PerfRanker`.
+
+        Each is appended onto the matching file's ``perf_hits`` in place so the
+        biomarkers handle every case through one path. Failure-isolated and never
+        blocks the report. The cross-function passes are a no-op without a graph;
+        the centrality-gated pass ALWAYS runs — when no graph/git signal is
+        available nothing is hot, so it emits nothing (precision-first: we never
+        ship a centrality-gated marker we cannot establish centrality for).
+        """
+        try:
+            index = CallGraphIndex(self.graph) if self.graph is not None else None
+            by_file: dict[str, list] = {}
+            if self.graph is not None and index is not None:
+                for src in (
+                    collect_crossfn_io_in_loop(walked, self.graph, index=index),
+                    collect_blocking_io_under_lock(walked, self.graph, index=index),
+                ):
+                    for path, hits in src.items():
+                        by_file.setdefault(path, []).extend(hits)
+            ranker = PerfRanker(index, self.git_meta_map)
+            for path, hits in collect_centrality_gated(walked, ranker).items():
+                by_file.setdefault(path, []).extend(hits)
+            for _pf, fcx in walked:
+                extra = by_file.get(_pf.file_info.path)
+                if extra:
+                    fcx.perf_hits = [*fcx.perf_hits, *extra]
+        except Exception as exc:
+            log.debug("health_crossfn_perf_failed", error=str(exc))
+            return
 
     def _function_blame_rows(self, walked: list[tuple[Any, FileComplexity]]) -> list[dict]:
         """Build the per-function blame rollup from the walked files + the
@@ -604,6 +673,7 @@ class HealthAnalyzer:
         repo_function_mod_p80: int | None = None,
         repo_dependents_p80: int | None = None,
         repo_active_contributors_90d: int | None = None,
+        severity_overrides: dict[str, Severity] | None = None,
     ) -> tuple[HealthFileMetricData, list[HealthFindingData]]:
         file_path = pf.file_info.path
 
@@ -663,17 +733,25 @@ class HealthAnalyzer:
             repo_function_mod_p80=repo_function_mod_p80,
             repo_active_contributors_90d=repo_active_contributors_90d,
             error_handling_hits=fcx.error_handling_hits,
+            perf_hits=fcx.perf_hits,
+            io_boundary_names=set(fcx.io_boundary_names),
         )
 
         biomarker_results = detect_all(ctx, disabled=disabled)
-        score, deductions = score_file(biomarker_results)
+        biomarker_results = remap_severities(biomarker_results, severity_overrides)
+        scores, deductions = score_file(biomarker_results)
         findings = attach_impacts(biomarker_results, deductions)
         for f in findings:
             f.file_path = file_path
 
+        # The overall surfaced score stays == the defect dimension (no blend
+        # yet); the per-dimension scores ride alongside it, additively.
+        defect_score = scores["defect"]
+        maint_score = scores["maintainability"]
+        perf_score = scores["performance"]
         metric = HealthFileMetricData(
             file_path=file_path,
-            score=round(score, 2),
+            score=round(defect_score, 2),
             max_ccn=max_ccn,
             max_nesting=max_nesting,
             nloc=nloc,
@@ -682,6 +760,9 @@ class HealthAnalyzer:
             line_coverage_pct=line_cov,
             branch_coverage_pct=branch_cov,
             duplication_pct=dup_pct,
+            defect_score=round(defect_score, 2),
+            maintainability_score=(round(maint_score, 2) if maint_score is not None else None),
+            performance_score=(round(perf_score, 2) if perf_score is not None else None),
         )
         return metric, findings
 

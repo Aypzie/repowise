@@ -65,7 +65,10 @@ from .git import (
     AgentTrendBucket,
     AgentTrendResponse,
     CommitDetailResponse,
+    CommitEvolutionBucket,
+    CommitEvolutionResponse,
     CommitResponse,
+    CommitStatsResponse,
     GitMetadataResponse,
     GitSummaryResponse,
     HotspotResponse,
@@ -94,6 +97,17 @@ from .graph import (
 from .health import (
     CoordinatorHealthResponse,
     HealthResponse,
+)
+from .mcp import (
+    McpToolInfo,
+    McpToolSurfaceResponse,
+    UpdateMcpToolsRequest,
+)
+from .meta import (
+    ChangelogEntryModel,
+    ChangelogResponse,
+    ChangelogSectionModel,
+    VersionResponse,
 )
 from .intelligence import (
     CallerCalleeEntry,
@@ -190,6 +204,8 @@ from .workspace import (
 __all__ = [
     "AgentTrendBucket",
     "AgentTrendResponse",
+    "CommitEvolutionBucket",
+    "CommitEvolutionResponse",
     "ArchEdgeResponse",
     "ArchLayerResponse",
     "ArchNodeResponse",
@@ -212,11 +228,15 @@ __all__ = [
     "C4SystemResponse",
     "CallerCalleeEntry",
     "CallersCalleesResponse",
+    "ChangelogEntryModel",
+    "ChangelogResponse",
+    "ChangelogSectionModel",
     "ChatMessageResponse",
     "ChatRequest",
     "CochangeWarning",
     "CommitDetailResponse",
     "CommitResponse",
+    "CommitStatsResponse",
     "CommunityDetailResponse",
     "CommunityMember",
     "CommunitySliceNodeResponse",
@@ -264,6 +284,8 @@ __all__ = [
     "KnowledgeMapResponse",
     "KnowledgeMapSilo",
     "KnowledgeMapTarget",
+    "McpToolInfo",
+    "McpToolSurfaceResponse",
     "ModuleEdgeResponse",
     "ModuleGraphResponse",
     "GoverningDecisionRef",
@@ -300,6 +322,8 @@ __all__ = [
     "SymbolNodeSummary",
     "SymbolResponse",
     "TransitiveEntry",
+    "UpdateMcpToolsRequest",
+    "VersionResponse",
     "WebhookResponse",
     "WorkspaceCoChangeEntry",
     "WorkspaceBlastRadiusResponse",

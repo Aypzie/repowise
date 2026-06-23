@@ -22,7 +22,7 @@ Connect repowise to Claude Code, Codex, Cursor, Cline, or any MCP-compatible edi
 
 ## Overview
 
-The MCP (Model Context Protocol) server is how repowise talks to AI coding assistants. Once connected, your editor's AI can call 10 tools to query your codebase wiki — synthesizing answers, looking up symbols, fetching docs, ownership, risk signals, dependency paths, and architectural decisions.
+The MCP (Model Context Protocol) server is how repowise talks to AI coding assistants. Once connected, your editor's AI can call 13 tools (10 single-repo + 3 workspace-only) to query your codebase wiki — synthesizing answers, looking up symbols, fetching docs, ownership, risk signals, dependency paths, and architectural decisions.
 
 Start the server with:
 
@@ -170,7 +170,7 @@ Clients connect to `http://localhost:7338/sse` and receive server-sent events.
 
 ---
 
-## The 10 tools
+## The single-repo tools
 
 ### `get_answer(question, scope?)`
 
@@ -321,27 +321,36 @@ get_why(query="why is rate limiting done in the app layer")
 
 ---
 
-### `search_codebase(query, limit?, page_type?)`
+### `search_codebase(query, limit?, mode?, kind?, symbol_kind?, page_type?)`
 
-Semantic search over the full wiki using natural language.
+Hybrid code search. Depending on the query, it searches the indexed **symbols**, **file paths**, or the **wiki** — a single tool for "find this function", "find this file", and "find code about this topic".
 
 **Parameters:**
-- `query` (string) — natural language query
+- `query` (string) — identifier, path, or natural-language query
 - `limit` (int, default 5) — max results
-- `page_type` (optional) — filter to `"file"`, `"module"`, or `"repository"`
+- `mode` (optional) — `auto` (default) \| `concept` \| `symbol` \| `path` \| `hybrid`
+- `kind` (optional) — `implementation` \| `test` \| `config` \| `doc`
+- `symbol_kind` (optional) — restrict symbol hits by kind (`function`, `class`, `method`, …)
+- `page_type` (optional) — `file_page` \| `module_page` \| `symbol_spotlight` (concept mode)
 
-**Returns:** Ranked list of wiki pages with relevance scores and short excerpts. Recently-changed files receive a freshness boost.
+**Modes:** `auto` routes by shape — an identifier searches indexed symbols (results carry `symbol_id` + line bounds, pipe into `get_symbol`), a path searches file pages (pipe into `get_context`), prose runs wiki-semantic search, and mixed queries run hybrid (symbols first). Force a branch with an explicit `mode`.
 
-**When to use:** When locating code — prefer over `grep`/`find` for conceptual searches.
+**Returns:** Symbol hits (`symbol_id`, `file`, line bounds, `signature`, `next: "get_symbol"`), file hits (`page_id`, `file`, `next: "get_context"`), or ranked wiki pages with relevance scores and a `search_method`. Recently-changed files receive a freshness boost.
+
+**When to use:** Locating a symbol or file by name, or discovering code by topic — prefer over `grep`/`find`.
 
 **Example:**
 ```
+search_codebase(query="GitIndexer index_repo")
+
+→ 1. symbol  packages/core/.../git_indexer/indexer.py::GitIndexer.index_repo
+     async def index_repo(...) -> tuple[GitIndexSummary, list[dict]]   (lines 75-306)
+     next: get_symbol
+
 search_codebase(query="how database connections are pooled")
 
 → 1. packages/server/src/repowise/server/db.py (0.92)
      "Creates async SQLAlchemy engine with connection pooling..."
-  2. packages/core/src/repowise/core/persistence/session.py (0.87)
-     "Session factory configured with pool_size=5..."
 ```
 
 ---
@@ -387,31 +396,6 @@ Returns a tiered report of unused code.
 
 ---
 
-### `get_architecture_diagram(scope?, path?, diagram_type?, show_heat?)`
-
-Generates a Mermaid diagram of the architecture.
-
-**Parameters:**
-- `scope` — `"repo"` (default), `"module"`, or `"file"`
-- `path` — required for module/file scope
-- `diagram_type` — `"auto"`, `"flowchart"`, `"class"`, or `"sequence"`
-- `show_heat` — boolean; colors nodes by churn intensity (red = hot, green = cold)
-
-**When to use:** For documentation, architecture reviews, or understanding unfamiliar areas.
-
-**Example output:**
-```mermaid
-graph TD
-  cli["CLI (init, update, mcp...)"]
-  core["Core (ingestion, analysis, generation)"]
-  server["Server (FastAPI + MCP)"]
-  cli --> core
-  cli --> server
-  server --> core
-```
-
----
-
 ## How AI editors use these tools
 
 The tools are designed to form a decision workflow:
@@ -421,6 +405,6 @@ The tools are designed to form a decision workflow:
 3. **Before editing a file** → `get_risk(targets=[...])` to assess impact
 4. **When facing an architectural question** → `get_why(query="...")` before changing structure
 5. **When locating code** → `search_codebase(query="...")` before grep
-6. **After making changes** → `update_decision_records(action="create", ...)` to record decisions
+6. **After making changes** → `get_why(query="...")` to confirm the change aligns with recorded architectural decisions
 
 The [CLAUDE.md generator](claude-md-generator) writes these instructions directly into your project's CLAUDE.md, so Claude Code follows this workflow automatically. Codex setup writes the same workflow into managed `AGENTS.md`.

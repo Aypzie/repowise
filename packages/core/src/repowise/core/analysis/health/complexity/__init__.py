@@ -8,6 +8,8 @@ from .walker import (
     ErrorHandlingHit,
     FileComplexity,
     FunctionComplexity,
+    PerfFnFacts,
+    PerfHit,
     walk_file,
     walk_file_complexity,
 )
@@ -18,6 +20,8 @@ __all__ = [
     "ErrorHandlingHit",
     "FileComplexity",
     "FunctionComplexity",
+    "PerfFnFacts",
+    "PerfHit",
     "walk_file",
     "walk_file_complexity",
 ]

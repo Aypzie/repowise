@@ -1,4 +1,5 @@
 export * from "./risk-score-card";
+export * from "./blast-radius-header";
 export * from "./impact-graph";
 export * from "./table-section";
 export * from "./direct-risks-table";
@@ -8,3 +9,5 @@ export * from "./reviewers-table";
 export * from "./test-gaps-list";
 export * from "./blast-radius-summary";
 export * from "./blast-radius-results";
+export * from "./impact-adapter";
+export * from "./impact-view";

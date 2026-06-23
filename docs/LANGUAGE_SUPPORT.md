@@ -429,6 +429,47 @@ without touching the shared pipeline files:
   class-level maps for all of those except Go (no class-grouping node).
   See `complexity/README.md` for the extension recipe and the LCOM4
   heuristic's limits.
+- `analysis/health/perf/dialects/` --- the **performance** health signal
+  (`io_in_loop` / `string_concat_in_loop` / language-specific markers) is
+  driven by a per-language `PerfDialect` plugin, registered in
+  `PERF_DIALECTS` exactly like `resolvers/` and the workspace `http/`
+  dialects. A dialect owns callee extraction (the per-grammar seam: Python
+  `attribute`, Go `selector_expression`, Java `method_invocation`'s
+  `object`/`name`, C# `member_access_expression`), the execution-sink
+  lexicon (`sink_kind`), the constant-loop / string-concat / async
+  predicates, and its own **marker list** --- so Go contributes
+  `defer_in_loop`, Java/Go contribute `regex_compile_in_loop`, C#
+  contributes sync-over-async `blocking_sync_in_async`, and the Phase-7a loop
+  markers (`resource_construction_in_loop`, `lock_in_loop`,
+  `serial_await_in_loop`, `membership_test_against_list_in_loop`) are each
+  opt-in per dialect via the `loop_call_marker` / `loop_stmt_marker` hooks,
+  none hardcoded in the walker. Every method has a safe "no signal" default, so a language
+  without a dialect (or one that overrides only some facets) produces no
+  false perf findings. Adding a language's perf support is one module plus a
+  `call_kinds` line on its `LanguageNodeMap` and its
+  `external_systems/io_kind.py` ecosystem rows --- no walker edits.
+
+#### Performance-signal coverage
+
+The performance signal needs the `PerfDialect` above (plus `call_kinds` on
+the language's `LanguageNodeMap`); it is independent of the control-flow /
+class / assertion tiers. A language without a dialect simply emits no perf
+findings.
+
+| Language | io_in_loop | string_concat | Phase-7a loop markers | Other language-specific markers | sync-over-async |
+|----------|:---:|:---:|---|---|:---:|
+| Python | Y | Y | resource_construction, lock, serial_await, membership | --- | `blocking_sync_in_async` |
+| TypeScript / JavaScript | Y | Y | resource_construction, serial_await, membership | --- | --- |
+| Java | Y | Y | resource_construction, lock | `regex_compile_in_loop` | --- (no async syntax) |
+| Go | Y | Y | resource_construction, lock | `defer_in_loop`, `regex_compile_in_loop` | --- (goroutines) |
+| C# | Y | Y | resource_construction, lock, serial_await | --- (.NET caches regexes) | `blocking_sync_in_async` (`.Result` / `.Wait()` / `.GetResult()`) |
+| Kotlin / Rust / C++ | --- | --- | --- | --- | --- |
+
+Kotlin will be nearly free once it rides the JVM lexicon; Rust (sqlx /
+reqwest) and C++ are later. What each dialect classifies as a db / network /
+filesystem / subprocess sink, and the per-language precision hazards, lives
+in `docs/CODE_HEALTH.md` and
+`local-stash/performance-pillar/PHASE6_PLAN.md`.
 
 ---
 

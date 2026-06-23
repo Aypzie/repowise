@@ -44,7 +44,15 @@ def _serialize_finding(f: HealthFinding) -> dict[str, Any]:
         "reason": f.reason,
         "details": details,
         "status": f.status,
+        # Health pillar this finding homes under (defect / maintainability /
+        # performance) for per-dimension filtering.
+        "dimension": getattr(f, "dimension", None) or "defect",
     }
+
+
+def _round_opt(v: Any) -> float | None:
+    """Round a nullable per-dimension score, preserving ``None`` (not measured)."""
+    return round(v, 2) if v is not None else None
 
 
 def _serialize_metric(m: HealthFileMetric) -> dict[str, Any]:
@@ -58,6 +66,12 @@ def _serialize_metric(m: HealthFileMetric) -> dict[str, Any]:
         "line_coverage_pct": m.line_coverage_pct,
         "branch_coverage_pct": m.branch_coverage_pct,
         "module": m.module,
+        # Per-dimension scores from the three-signal split. ``score`` is the
+        # overall surfaced number (== ``defect_score`` for now);
+        # ``performance_score`` is computed but not yet surfaced as its own pillar.
+        "defect_score": _round_opt(getattr(m, "defect_score", None)),
+        "maintainability_score": _round_opt(getattr(m, "maintainability_score", None)),
+        "performance_score": _round_opt(getattr(m, "performance_score", None)),
     }
 
 
@@ -111,6 +125,22 @@ def _module_rollups(metrics: list[HealthFileMetric]) -> list[dict[str, Any]]:
     return out
 
 
+def _dimension_average(metrics: list[HealthFileMetric], attr: str) -> float | None:
+    """NLOC-weighted headline over a per-dimension score attribute.
+
+    Skips rows without the attribute (those predating that pillar) so the KPI
+    reads "not measured" rather than a misleading 10.0; ``None`` when no row
+    carries it.
+    """
+    scored = [m for m in metrics if getattr(m, attr, None) is not None]
+    if not scored:
+        return None
+    total_nloc = sum(max(m.nloc, 1) for m in scored)
+    if not total_nloc:
+        return round(sum(getattr(m, attr) for m in scored) / len(scored), 2)
+    return round(sum(getattr(m, attr) * max(m.nloc, 1) for m in scored) / total_nloc, 2)
+
+
 def _compute_kpis(metrics: list[HealthFileMetric]) -> dict[str, Any]:
     if not metrics:
         return {
@@ -118,6 +148,8 @@ def _compute_kpis(metrics: list[HealthFileMetric]) -> dict[str, Any]:
             "average_health": 10.0,
             "worst_performer_path": None,
             "worst_performer_score": None,
+            "maintainability_average": None,
+            "performance_average": None,
         }
     total_nloc = sum(max(m.nloc, 1) for m in metrics)
     avg = sum(m.score * max(m.nloc, 1) for m in metrics) / total_nloc
@@ -128,6 +160,10 @@ def _compute_kpis(metrics: list[HealthFileMetric]) -> dict[str, Any]:
         "band": band_for(round(avg, 2)),
         "worst_performer_path": worst.file_path,
         "worst_performer_score": round(worst.score, 2),
+        # Maintainability + performance pillar headlines alongside the
+        # defect-backed average. Each is ``None`` until its pillar is measured.
+        "maintainability_average": _dimension_average(metrics, "maintainability_score"),
+        "performance_average": _dimension_average(metrics, "performance_score"),
     }
 
 
@@ -147,6 +183,23 @@ async def get_health(
     Biomarkers in v1: ``brain_method``, ``nested_complexity``,
     ``complex_method``. Phase 2 adds coverage biomarkers; Phase 3 adds
     duplication + organizational biomarkers.
+
+    Three-signal health: every file metric carries per-dimension scores. ``score``
+    is the overall, defect-calibrated number surfaced everywhere (== ``defect_score``);
+    ``maintainability_score`` is a co-equal signal made of the smells the defect
+    calibration floors (cohesion, brain methods, primitive obsession, duplication,
+    error handling) given full weight in their own pillar; ``performance_score`` is
+    the third co-equal pillar: static performance RISK (I/O-in-loop / N+1 shapes that
+    waste work), high-precision / low-recall, NEVER blended into the defect headline.
+    ``kpis.maintainability_average`` and ``kpis.performance_average`` are the
+    NLOC-weighted repo headlines for those pillars (``None`` when unmeasured). Each
+    finding carries a ``dimension`` (``defect`` / ``maintainability`` /
+    ``performance``) naming the pillar it homes under, so findings can be filtered
+    per dimension. A performance finding's ``details`` carry the ``boundary_kind``
+    it crosses (``db`` / ``network`` / ``filesystem`` / ``subprocess`` / ``lock``),
+    a ``cross_function`` flag, and, for a cross-function N+1, the ``path`` (the
+    resolved ``caller -> ... -> sink`` symbol chain). Performance is a static signal:
+    dynamic dispatch, ORM lazy-load, and unmodelled libraries are out of scope.
 
     Args:
         targets: List of file paths. Empty → dashboard mode.

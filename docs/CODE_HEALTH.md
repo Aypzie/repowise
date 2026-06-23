@@ -69,6 +69,223 @@ The final score is clamped to `[1.0, 10.0]`. The three repo-level KPIs:
 - **Average Health** — NLOC-weighted average over all files.
 - **Worst Performer** — single lowest-scoring file.
 
+## Three health signals: defect risk, maintainability, and performance
+
+Repowise surfaces **three orthogonal health signals** computed from the same
+biomarker stream by one shared scoring kernel: **defect risk** (the calibrated,
+overall number), **maintainability**, and **performance**. They are co-equal
+*views*, never blended into one number (see "The overall score" below for why).
+
+The score above is the **defect-risk** signal: it is calibrated against a defect
+corpus, the bands are calibrated to it (Alert files carry ~17x the defect rate
+of Healthy files), and it is the overall number surfaced everywhere. But not
+every code smell predicts bugs. A handful of biomarkers fire widely and matter a
+lot for how hard code is to read and change, yet proved weak as defect
+predictors under leakage-free scoring, so the defect calibration floors them to
+0.5 (`low_cohesion`, `brain_method`, `primitive_obsession`, `dry_violation`,
+`error_handling`). Floored inside a defect-framed score they do two unhelpful
+things at once: they still nudge the number a little (noise against the
+calibrated signal) and they get no credit for the real problem they describe
+(maintainability).
+
+Repowise therefore computes a second, parallel signal, **maintainability**, from
+the same biomarker stream:
+
+- The floored smells above deduct at **full weight (1.0)** in maintainability
+  instead of the 0.5 the defect calibration imposes. The defect calibration does
+  not apply to a non-defect signal, so the maintainability weights are expert-set
+  and tuned only against the maintainability pillar's own per-category caps.
+- The structural smells that are genuine defect predictors **and** core
+  maintainability concerns (`god_class`, `large_method`, `nested_complexity`)
+  count toward **both** dimensions.
+- Pure defect/organizational predictors (`change_entropy`, `ownership_risk`,
+  `co_change_scatter`, ...) stay out of maintainability entirely.
+
+The two signals are computed by the single shared scoring kernel
+(`scoring.score_file`) against independent weight/category/cap tables, and they
+**never feed back into each other**. The overall, surfaced score remains exactly
+the defect score (byte-for-byte; a golden test locks this) until a later,
+deliberate decision to blend. Maintainability is surfaced alongside it as a
+co-equal headline:
+
+- **REST/overview**: `summary.maintainability_average` plus a per-file
+  `maintainability_score` on every metric row.
+- **MCP `get_health`**: `kpis.maintainability_average` and per-file
+  `defect_score` / `maintainability_score` / `performance_score`.
+- **CLAUDE.md** and the CLI `status` line print a maintainability headline next
+  to defect-risk health.
+- Every finding carries a `dimension` (`defect` / `maintainability` /
+  `performance`) naming the pillar it homes under, so findings can be filtered
+  per signal.
+
+## Performance: static performance risk
+
+The third signal, **performance**, flags *shapes that waste work* (code whose
+structure does redundant I/O), rather than measured runtime. It is deliberately
+**high-precision, low-recall**: a few real findings the rest of the toolchain
+can trust beat a wall of maybes. The detectors (all under one bounded `performance`
+category cap of 1.0, so the pillar stays advisory) are:
+
+- **`io_in_loop`**: a database call, network request, filesystem read, or
+  subprocess spawn that runs **once per loop iteration**: the classic N+1. This
+  is the moat. Two things make it more than a file-local lint:
+  - **Dependency classification.** The loop-nested call is resolved through a
+    shared I/O-boundary classifier (`io_kind ∈ {db, network, filesystem,
+    subprocess, lock}`) and only fires on a *classified* execution sink (an
+    actual round-trip like `.execute` / awaited HTTP / `subprocess.run`), not a
+    query-builder chain or a same-named pure helper.
+  - **Call-graph reachability.** The loop and the I/O call need not be in the
+    same function. A bounded-depth (≤3 hops) walk over the resolved `calls` graph
+    catches the interprocedural case (loop in `A`, sink in a helper `A` calls)
+    that no file-local linter can see. Cross-function findings carry their
+    resolved `caller -> ... -> sink` path for explainability.
+- **`string_concat_in_loop`**: quadratic `+=` string building in a loop.
+- **`blocking_sync_in_async`**: a synchronous blocking call inside an `async`
+  function, which stalls the whole event loop (mirrors ruff `ASYNC210/230/251`).
+- **`resource_construction_in_loop`**: a heavy I/O client or connection
+  (`sqlite3.connect` / `httpx.Client` / `boto3.client` / `new PrismaClient` /
+  `new HttpClient` / `sql.Open`) constructed every iteration instead of hoisted:
+  connection churn, and socket exhaustion for `HttpClient`.
+- **`lock_in_loop`**: a mutex acquired on every iteration (`lock.acquire` /
+  `mu.Lock` / `synchronized` / `lock(x){}`): a contention site. Activates the
+  `lock` I/O-boundary kind.
+- **`serial_await_in_loop`**: an awaited I/O round-trip run one at a time in a
+  loop where a `gather` / `Promise.all` could fan it out. Advisory — a static
+  analyzer cannot prove the iterations are independent, so the finding suggests
+  rather than asserts.
+- **`membership_test_against_list_in_loop`**: `x in big_list` (or
+  `big_list.includes(x)`) inside a loop is O(n·m); a set makes each lookup O(1).
+  Fires only when the right operand is *provably* a list, never a set or dict.
+- **`nested_loop_with_io`**: an I/O sink in the inner body of a **nested** loop:
+  O(n·m) round-trips, the quadratic cousin of `io_in_loop`. The nesting itself
+  raises confidence the finding is real, so it surfaces alongside `io_in_loop`.
+- **`blocking_io_under_lock`**: an I/O round-trip reached while a block-scoped
+  lock is held (a C# `lock(){}` / Java `synchronized(){}` block, directly or
+  through a call). Every other thread blocks for the full I/O wait — a throughput
+  killer. The cross-function case reuses the same bounded-reachability engine as
+  the N+1 moat, with a `lock → io` entry set.
+
+Two markers use **centrality as a precision gate**, not just a sort key — a
+shape that is noisy when flagged everywhere only fires in a *hot* function (one
+with top-quintile call-graph in-degree, or in a churny/hotspot file), computed by
+a reusable severity ranker over the same call graph the N+1 pass uses:
+
+- **`hot_path_sync_io`**: a blocking **subprocess / filesystem** call in a hot,
+  request-reachable function — **even outside a loop**. Generalizes the pillar
+  beyond loops: its latency is paid on every call through the function. (DB and
+  network are excluded — both are awaited in async code, and the un-awaited calls
+  a static pass sees are result *materializers* or chained awaits, not blocking
+  round-trips; subprocess/filesystem are synchronous by construction.) Advisory —
+  a latency signal ranked by centrality, not a defect.
+- **`nested_loop_quadratic`**: a data-dependent loop nested inside another
+  (O(n²)) in a hot function. The centrality gate makes the list short and
+  reviewable (it cut a 13× volume of raw nested loops), but centrality answers
+  "is this function important", not "is n large" — so it ships **advisory /
+  informational** only, never at a weight that moves the score.
+
+A few markers are language-specific, contributed by that language's dialect (see
+below) rather than the shared core:
+
+- **`regex_compile_in_loop`** (Java, Go): a `Pattern.compile` /
+  `regexp.MustCompile` recompiled every iteration instead of hoisted. Skipped on
+  Python / .NET, which cache compiled patterns; on Go it fires only for a
+  **string-literal pattern** (a dynamic argument may legitimately vary per
+  iteration and cannot be hoisted).
+- **`defer_in_loop`** (Go): a `defer` inside a loop holds the deferred handle
+  until the enclosing function returns, not the iteration: the classic Go file /
+  row-handle leak. A pure syntactic shape, very high precision.
+- **`goroutine_in_unbounded_loop`** (Go): a `go …()` spawned per element of a
+  `for k, v := range coll` loop, with no concurrency bound — a spawn explosion
+  (use a worker pool / bounded `errgroup`). Restricted to the two-variable
+  `range` form, which is only legal over a collection (a single-variable
+  `for i := range n` is a bounded count loop). Advisory.
+- **`list_insert_zero_in_loop`** (Python): `lst.insert(0, x)` each iteration
+  shifts the whole list (O(n²)); use `collections.deque.appendleft`. Gated to a
+  literal `0` index and to a list not re-created each iteration.
+- **`pd_concat_in_loop`** (Python): `pd.concat([acc, chunk])` inside a loop
+  copies the whole frame each pass (O(n²)); collect chunks and concat once.
+- **`json_parse_in_loop`** (JS/TS): the `JSON.parse(JSON.stringify(x))`
+  deep-clone idiom in a loop (use `structuredClone`). Restricted to that idiom —
+  parsing a *distinct* payload each iteration is necessary work, not waste.
+  Advisory.
+- **`array_spread_in_reduce`** (JS/TS): `arr.reduce((a, x) => [...a, x], [])`
+  rebuilds the accumulator every step (O(n²)); push-and-return instead. The
+  `.reduce` is itself the loop, so this fires regardless of an enclosing loop.
+- **sync-over-async** (C#, via `blocking_sync_in_async`): `.Result` / `.Wait()`
+  / `.GetAwaiter().GetResult()` inside an `async` method blocks a thread-pool
+  thread. C# is the one non-Python language with real `async`/`await`.
+
+Each performance finding's `details` carry the `boundary_kind` it crosses, a
+`cross_function` flag, and the reachability `path` for the cross-function case.
+Severity is ranked by **centrality** (an N+1 in a high-traffic, churny function
+outranks one in a leaf), not by raw count.
+
+**Languages.** The performance signal fires on **Python, TypeScript/JavaScript,
+Java, Go, and C#**. Each language is a self-contained `PerfDialect` plugin
+(`analysis/health/perf/dialects/`) that owns its callee-extraction grammar, its
+execution-sink lexicon, the loop / string / async predicates, and its own marker
+list, registered in `PERF_DIALECTS` like the rest of the per-language pipeline.
+A language without a dialect emits no perf findings (never a wrong one). The
+db/network/filesystem/subprocess lexicons and the per-language precision hazards
+(Java `.find`/`.get`, GORM `Find`/`Save`, C# in-memory-vs-`IQueryable` LINQ) are
+documented in `local-stash/performance-pillar/PHASE6_PLAN.md`. The verb sets are
+gated for precision: distinctive sinks (EF `*Async`, Spring-Data `findBy*`, JDBC
+`executeQuery`) fire on name alone, while ambiguous verbs require file-level
+db-import evidence. **`io_in_loop` is validated across languages** on an 11-repo
+OSS corpus: Go 96.7%, TypeScript 100%, Python 96.2% hand-labeled precision; the
+`blocking_sync_in_async` C# `.Result`/Result-pattern collision and the Go
+`*sql.Rows.Scan` cursor FP were caught and fixed by that validation.
+`string_concat_in_loop` is validated at 100% (26/26) after a reset-per-iteration
+guard (an accumulator re-initialized each iteration is bounded, not O(n²)).
+`nested_loop_quadratic` now fires only on a **same-collection** shape (two nested
+loops over the same collection = all-pairs O(n²)) instead of raw nesting depth;
+that makes it precision-safe-by-construction but rare, so it stays advisory-only,
+as do `blocking_io_under_lock`, `pd_concat_in_loop`, `json_parse_in_loop`, and
+`goroutine_in_unbounded_loop` (high-precision by construction, low corpus recall).
+
+**Soundness limits (honest, by design).** Performance is a *static* signal, so
+it under-reports rather than over-reports (these cap recall, not precision):
+dynamic dispatch / monkeypatching / callbacks-as-values produce no `calls` edge
+and are invisible; ORM lazy-load N+1 fires on attribute access (no visible call)
+and is explicitly out of scope --- this includes Hibernate lazy-load N+1 (fires
+on a getter) and EF Core navigation-property lazy load, so we catch *explicit*
+repository / query calls in loops, not attribute-triggered lazy loads; chains
+longer than three hops from the loop are not followed; and an unmodelled library
+is untyped (`None`), so its sinks don't fire. We call this **performance RISK**,
+never measured performance, and never fold it into the defect score. The
+commit-agreement precision study and its caveats live in
+`local-stash/performance-pillar/VALIDATION.md`.
+
+Performance surfaces exactly where maintainability does: a `performance_average`
+on the overview summary and MCP `kpis`, a per-file `performance_score`, a
+Performance KPI card and per-pillar finding filter on the dashboard, the
+per-file Health tab and drawer, and a `Performance risk` line in CLAUDE.md and
+the CLI `status` summary (each omitted/`null` on indexes built before the
+detectors landed). The dimension names are mirrored in `@repowise-dev/types`
+(`HEALTH_DIMENSIONS`) with a parity test on each side.
+
+## The overall score: defect, not a blend
+
+The single number repowise surfaces as the headline (the dashboard ring, the
+band, the badge, the "does the score find the bugs?" stat) is, and stays, the
+**defect score**. Maintainability and performance are presented as co-equal
+*pillars/views*, not blended into the headline. This is a deliberate decision,
+for three reasons:
+
+1. **Band calibration.** The Healthy/Warning/Alert cutoffs are calibrated to the
+   defect score (Alert ≈ 17× the defect rate). A blended headline would invalidate
+   those boundaries with no recalibration corpus behind the new number.
+2. **Honesty of the validation stat.** "Does the score find the bugs?" is a claim
+   about the *defect* pillar; it must stay bound to the number it measures.
+3. **Different precision profiles.** Maintainability is expert-set and performance
+   is high-precision/low-recall advisory — neither is a calibrated bug predictor,
+   so neither should move the bug-calibrated headline.
+
+A golden test (`tests/unit/health/test_scoring_dimensions`) locks the defect
+score byte-for-byte against the pre-split single score, so no pillar can ever
+regress it. Introducing a blended overall score would require a written rationale
+and a recalibration plan; until then, overall = defect.
+
 ## Bands and distribution
 
 On top of the 1–10 number, every score falls into one of three **bands**. These
@@ -472,6 +689,33 @@ Per-file overrides live in `.repowise/health-rules.json`:
 `path` holds an fnmatch-style glob over the repo-relative POSIX path
 (`path_glob` and `glob` are accepted aliases).
 
+### Severity overrides and profiles
+
+A team can soften a signal it treats as advisory without disabling it
+outright by remapping its severity (typically a *demotion*). Overrides apply
+repo-wide and per-path; an explicit per-path entry wins over the repo-wide one.
+
+```json
+{
+  "profile": "small-team",
+  "severity_overrides": { "complex_method": "low" },
+  "rules": [
+    { "path": "src/generated/**", "severity_overrides": { "large_method": "low" } }
+  ]
+}
+```
+
+Accepted severity values are `low`, `medium`, `high`, `critical`. The named
+`small-team` profile expands to a preset demotion of the process/people and
+noisier structural signals a 1-3 person repo can't support; an explicit
+`severity_overrides` key always wins over the preset.
+
+Only the severity *label* is tunable. The per-biomarker weight multipliers and
+the category caps are the calibrated constants the benchmark numbers rest on
+and are deliberately **not** overridable, so a team's local policy never
+changes what the published accuracy claims mean. Biomarkers that carry a
+continuous deduction (`coverage_gradient`) are unaffected by severity remaps.
+
 ## Incremental updates
 
 `repowise update` only re-scores the changed files. Findings and metrics for
@@ -479,10 +723,11 @@ unchanged files stay put — no nightly full re-index needed.
 
 ## Status one-liner
 
-`repowise status` includes a single-line health summary:
+`repowise status` includes a single-line health summary (the maintainability and
+performance pillars append once the index has populated them):
 
 ```
-Health: 7.4 (avg) · 6.2 (hotspots) · 2.1 (worst: payments/processor.ts)
+Health: 7.4 (avg) · 6.2 (hotspots) · 2.1 (worst: payments/processor.ts) · 7.0 (maintainability) · 9.1 (performance)
 ```
 
 ## Comparison
