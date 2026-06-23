@@ -122,6 +122,7 @@ async def test_generate_returns_generated_response():
         result = await provider.generate(
             system_prompt="You are a test assistant",
             user_prompt="Say hello",
+            temperature=0.2,
         )
 
     assert isinstance(result, GeneratedResponse)
@@ -131,6 +132,10 @@ async def test_generate_returns_generated_response():
 
     kwargs = mock_client.return_value.chat.completions.create.call_args.kwargs
     assert kwargs["model"] == "kimi-k2.7-code"
+    # The coding model rejects any temperature other than 1 (400
+    # invalid_request_error: "only 1 is allowed for this model"), so the
+    # provider must pin it to 1 regardless of the caller's value.
+    assert kwargs["temperature"] == 1.0
 
 
 async def test_generate_captures_cached_tokens():

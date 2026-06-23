@@ -60,6 +60,11 @@ _DEFAULT_MODEL = "kimi-k2.7-code"
 # Coding-agent User-Agent required by the Kimi For Coding gate. Override via
 # KIMI_USER_AGENT if Kimi rotates the accepted client list.
 _DEFAULT_USER_AGENT = "KimiCLI/1.3"
+# The Kimi coding model is a reasoning model and rejects any temperature other
+# than 1 with ``400 invalid_request_error: "invalid temperature: only 1 is
+# allowed for this model"``. Callers across repowise pass low temperatures
+# (0.2–0.7) for determinism; we pin to 1 here so every request is accepted.
+_REQUIRED_TEMPERATURE = 1.0
 
 
 def _kimi_headers(user_agent: str) -> dict[str, Any]:
@@ -243,7 +248,9 @@ class KimiProvider(BaseProvider):
             kwargs: dict[str, Any] = {
                 "model": self._model,
                 "max_tokens": max_tokens,
-                "temperature": temperature,
+                # The caller's ``temperature`` is ignored: this model only
+                # accepts 1 (see ``_REQUIRED_TEMPERATURE``).
+                "temperature": _REQUIRED_TEMPERATURE,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -337,7 +344,8 @@ class KimiProvider(BaseProvider):
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
+            # Ignore the caller's temperature — this model only accepts 1.
+            "temperature": _REQUIRED_TEMPERATURE,
             "messages": full_messages,
             "stream": True,
         }
