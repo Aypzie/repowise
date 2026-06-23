@@ -20,7 +20,7 @@ RUN npm run build
 
 FROM python:3.12-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     wget     ca-certificates     gnupg     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     wget     ca-certificates     gnupg     gosu     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
 
 # Pin the opencode version so the installer skips its "latest release" lookup
 # against the GitHub API, which is rate-limited (60 req/hr per IP) on shared
@@ -51,12 +51,22 @@ ENV PORT_BACKEND=7337
 ENV PORT_FRONTEND=3000
 ENV HOSTNAME=0.0.0.0
 
+# Run as nobody:users (uid 99 / gid 100) by default — matches Unraid's native
+# share ownership so bind-mounted repos under /mnt are writable without host
+# chowns. Override with PUID/PGID (LinuxServer-style) for other hosts. HOME is
+# pinned so libraries that call Path.home() work for this passwd-less uid.
+ENV HOME=/app
+ENV PUID=99
+ENV PGID=100
+
 EXPOSE 7337 3000
 
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /data && groupadd -r repowise && useradd -r -g repowise -d /app -s /sbin/nologin repowise     && chown -R repowise:repowise /app /data
-USER repowise
+# Pre-own the app + data dir for the default uid/gid. The entrypoint re-chowns
+# /data at startup (as root) to cover an existing persistent volume, then drops
+# privileges via gosu — so we intentionally do NOT set a static USER here.
+RUN mkdir -p /data && chown -R 99:100 /app /data
 
 ENTRYPOINT ["/app/entrypoint.sh"]

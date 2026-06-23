@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Privilege drop. The container starts as root so we can fix ownership of the
+# mounted /data volume (which may pre-date this image and be owned by a stale
+# uid), then re-exec ourselves as the unprivileged PUID:PGID — defaulting to
+# nobody:users (99:100) to match Unraid. /git is left untouched: it's the
+# user's bind-mounted repos, already owned correctly on the host.
+if [ "$(id -u)" = "0" ]; then
+  PUID="${PUID:-99}"
+  PGID="${PGID:-100}"
+  echo "Setting ownership of /data to ${PUID}:${PGID} and dropping privileges..."
+  chown -R "${PUID}:${PGID}" /data 2>/dev/null || true
+  chown "${PUID}:${PGID}" /app 2>/dev/null || true
+  exec gosu "${PUID}:${PGID}" "$0" "$@"
+fi
+
 # Configure opencode CLI auth non-interactively. opencode stores credentials
 # in $HOME/.local/share/opencode/auth.json; in a container there is no
 # /connect flow, so materialise the file from the OPENCODE_GO_API_KEY env var.
