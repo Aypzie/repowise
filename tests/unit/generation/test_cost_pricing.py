@@ -21,3 +21,9 @@ def test_nano_models_priced_at_nano_rate_not_fallback() -> None:
 
 def test_unknown_model_still_falls_back() -> None:
     assert get_model_pricing("totally-made-up-model-9000") == _FALLBACK_PRICING
+
+
+def test_kimi_priced_at_cache_miss_rate_not_fallback() -> None:
+    pricing = get_model_pricing("kimi-k2.7-code")
+    assert pricing == {"input": 0.95, "output": 4.0}
+    assert pricing != _FALLBACK_PRICING

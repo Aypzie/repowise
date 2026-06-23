@@ -35,7 +35,7 @@ _PRICING: dict[str, dict[str, float]] = {
     "gpt-5-mini": {"input": 0.25, "output": 2.0},
     # Nano tier — $0.05/$0.40 per 1M. Without these keys the model name falls
     # through to ``_FALLBACK_PRICING`` (Sonnet $3/$15) and overstates a nano
-    # indexing run ~40×.
+    # indexing run ~40x.
     "gpt-5-nano": {"input": 0.05, "output": 0.40},
     "gpt-5.4-nano": {"input": 0.05, "output": 0.40},
     "gpt-4o": {"input": 2.5, "output": 10.0},
@@ -53,6 +53,11 @@ _PRICING: dict[str, dict[str, float]] = {
     # DeepSeek
     "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
     "deepseek-v4-pro": {"input": 1.74, "output": 3.48},
+    # Kimi (Moonshot) "Kimi For Coding". Input uses the cache-miss rate ($0.95);
+    # the cache-hit rate ($0.19/1M) is not modelled because record() charges all
+    # input tokens at one rate (as for every other provider), so reports slightly
+    # overestimate when prompt caching is active.
+    "kimi-k2.7-code": {"input": 0.95, "output": 4.0},
 }
 
 _FALLBACK_PRICING: dict[str, float] = {"input": 3.0, "output": 15.0}
