@@ -15,14 +15,23 @@ if [ "$(id -u)" = "0" ]; then
   exec gosu "${PUID}:${PGID}" "$0" "$@"
 fi
 
+# We now run as the unprivileged user. Pin HOME explicitly: this uid has no
+# /etc/passwd entry, so HOME would otherwise resolve to "/" (unwritable), which
+# breaks anything that writes under $HOME (opencode auth, library caches).
+export HOME=/app
+
 # Configure opencode CLI auth non-interactively. opencode stores credentials
 # in $HOME/.local/share/opencode/auth.json; in a container there is no
 # /connect flow, so materialise the file from the OPENCODE_GO_API_KEY env var.
+# Best-effort: a failure here must never take down the whole container.
 if [ -n "${OPENCODE_GO_API_KEY:-}" ]; then
-  OC_AUTH_DIR="${HOME:-/app}/.local/share/opencode"
-  mkdir -p "$OC_AUTH_DIR"
-  printf '{"opencode-go":{"key":"%s","type":"api"}}' "$OPENCODE_GO_API_KEY" > "$OC_AUTH_DIR/auth.json"
-  chmod 600 "$OC_AUTH_DIR/auth.json"
+  OC_AUTH_DIR="${HOME}/.local/share/opencode"
+  if mkdir -p "$OC_AUTH_DIR" 2>/dev/null; then
+    printf '{"opencode-go":{"key":"%s","type":"api"}}' "$OPENCODE_GO_API_KEY" > "$OC_AUTH_DIR/auth.json"
+    chmod 600 "$OC_AUTH_DIR/auth.json"
+  else
+    echo "WARNING: could not create ${OC_AUTH_DIR}; skipping opencode auth setup" >&2
+  fi
 fi
 
 # Start the FastAPI backend
