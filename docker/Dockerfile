@@ -22,7 +22,12 @@ FROM python:3.12-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends     git     curl     wget     ca-certificates     gnupg     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && apt-get install -y --no-install-recommends nodejs     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://opencode.ai/install | bash \
+# Pin the opencode version so the installer skips its "latest release" lookup
+# against the GitHub API, which is rate-limited (60 req/hr per IP) on shared
+# build hosts and intermittently fails the build with "Failed to fetch version
+# information". Passing VERSION makes the script download the release directly.
+ARG OPENCODE_VERSION=1.17.9
+RUN curl -fsSL https://opencode.ai/install | VERSION="${OPENCODE_VERSION}" bash \
     && cp /root/.opencode/bin/opencode /usr/local/bin/opencode \
     && opencode --version
 
