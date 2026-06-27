@@ -279,6 +279,39 @@ class GraphMetric(Base):
     __table_args__ = (UniqueConstraint("repository_id", "node_id", name="uq_graph_metric"),)
 
 
+class GraphNodeMembership(Base):
+    """Materialized component memberships — SCCs and symbol communities.
+
+    Persists two structural facts the graph carries but never exposed as
+    queryable rows: file-level strongly-connected components (import cycles,
+    ``scc_id`` / ``scc_size`` with ``scc_size >= 2``) and symbol-level
+    communities (``symbol_community_id``). The break-cycle and move-method
+    refactoring detectors compute the same structure from the in-memory graph
+    at health time; this snapshot lets the web layer read cycles and
+    communities without rebuilding the graph. Additive to ``graph_nodes`` /
+    ``graph_metrics``; non-load-bearing.
+    """
+
+    __tablename__ = "graph_node_membership"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_uuid)
+    repository_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_type: Mapped[str] = mapped_column(String(16), nullable=False, default="file")
+    scc_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scc_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    symbol_community_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now_utc
+    )
+
+    __table_args__ = (
+        UniqueConstraint("repository_id", "node_id", name="uq_graph_node_membership"),
+    )
+
+
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
 
@@ -889,6 +922,44 @@ class HealthFinding(Base):
     # performance). Nullable + no backfill: old rows stay NULL until the next
     # index recomputes them; new writes always set it (defaults to "defect").
     dimension: Mapped[str | None] = mapped_column(String(16), nullable=True, default="defect")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now_utc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now_utc, onupdate=_now_utc
+    )
+
+
+class RefactoringSuggestion(Base):
+    """One deterministic refactoring opportunity from the refactoring layer.
+
+    Mirrors the ``RefactoringSuggestion`` dataclass in
+    ``analysis/health/refactoring/models.py``. ``plan_json`` /
+    ``evidence_json`` / ``blast_radius_json`` carry the structured,
+    type-specific payloads (open dicts) so later refactoring types add no
+    columns. Written delete-then-insert per repo (or upserted per changed
+    file on incremental updates), exactly like ``health_findings``.
+    """
+
+    __tablename__ = "refactoring_suggestions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_uuid)
+    repository_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
+    )
+    refactoring_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    target_symbol: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    line_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    impact_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    effort_bucket: Mapped[str] = mapped_column(String(8), nullable=False, default="")
+    blast_radius_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    source_biomarker: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now_utc

@@ -74,3 +74,15 @@ class HealthReport:
     # Per-function blame rollup rows (``git_function_blame``), derived from the
     # FULL-tier blame index. Empty on ESSENTIAL tier / when blame is absent.
     function_blame_rows: list[dict] = field(default_factory=list)
+    # Deterministic refactoring suggestions (``RefactoringSuggestion``), one
+    # per detected opportunity. Produced by the refactoring layer in the same
+    # per-file pass that produces findings; empty when the layer is disabled
+    # or no opportunity is found. Typed ``Any`` to avoid importing the
+    # refactoring package here (it imports this module).
+    refactoring_suggestions: list[Any] = field(default_factory=list)
+    # Resolved coverage rows ingested for this run (``FileCoverage`` with
+    # canonical repo keys), plus the source format. Populated by the pipeline
+    # when a coverage report is discovered/passed; the persister writes these
+    # to the ``coverage_files`` table. Empty when no coverage was ingested.
+    coverage_files: list[Any] = field(default_factory=list)
+    coverage_format: str | None = None

@@ -79,6 +79,17 @@ from repowise.cli.helpers import (
     help="Print top refactoring candidates (impact/effort ratio).",
 )
 @click.option(
+    "--generate-code",
+    "generate_code",
+    default=None,
+    metavar="SELECTOR",
+    help=(
+        "Opt-in: generate refactored code + a diff for one suggestion via the "
+        "configured LLM. SELECTOR is a 1-based rank (e.g. 1) or a target-symbol "
+        "match. Reuses the repo's provider/model; requires an API key."
+    ),
+)
+@click.option(
     "--module",
     "module_filter",
     default=None,
@@ -108,6 +119,7 @@ def health_command(
     coverage_paths: tuple[str, ...],
     coverage_format: str | None,
     refactoring_targets: bool,
+    generate_code: str | None,
     module_filter: str | None,
     trend_view: bool,
     badge_view: bool,
@@ -285,8 +297,22 @@ def health_command(
     if module_filter:
         findings = [f for f in findings if f.file_path.startswith(module_filter)]
 
+    if generate_code is not None:
+        suggestions = getattr(report, "refactoring_suggestions", None) or []
+        if file_filter:
+            suggestions = [s for s in suggestions if s.file_path == file_filter]
+        if module_filter:
+            suggestions = [s for s in suggestions if s.file_path.startswith(module_filter)]
+        _generate_refactoring_code(repo_path, suggestions, generate_code, fmt=fmt)
+        return
+
     if refactoring_targets:
-        _render_refactoring_targets(metrics_sorted, findings, fmt=fmt)
+        suggestions = getattr(report, "refactoring_suggestions", None) or []
+        if file_filter:
+            suggestions = [s for s in suggestions if s.file_path == file_filter]
+        if module_filter:
+            suggestions = [s for s in suggestions if s.file_path.startswith(module_filter)]
+        _render_refactoring_targets(metrics_sorted, findings, suggestions, fmt=fmt)
         return
 
     if badge_view:
@@ -489,10 +515,110 @@ def _effort_bucket(nloc: int) -> tuple[str, int]:
     return "XL", 5
 
 
+def _suggestion_to_dict(s: object) -> dict:
+    """Serialize a ``RefactoringSuggestion`` dataclass to a plain dict."""
+    import dataclasses
+
+    return dataclasses.asdict(s) if dataclasses.is_dataclass(s) else dict(s)
+
+
+def _select_suggestion(suggestions: list, selector: str):
+    """Pick one suggestion by a 1-based rank or a target-symbol match.
+
+    ``suggestions`` is the engine's unified-ranked list, so ``"1"`` is the top
+    candidate. A non-numeric selector matches ``target_symbol`` exactly first,
+    then falls back to a unique case-insensitive substring match.
+    """
+    if selector.isdigit():
+        idx = int(selector) - 1
+        if 0 <= idx < len(suggestions):
+            return suggestions[idx]
+        raise click.ClickException(
+            f"Rank {selector} is out of range (1-{len(suggestions)} available)."
+        )
+    exact = [s for s in suggestions if s.target_symbol == selector]
+    if len(exact) == 1:
+        return exact[0]
+    needle = selector.lower()
+    partial = [s for s in suggestions if needle in s.target_symbol.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise click.ClickException(f"No refactoring suggestion matches {selector!r}.")
+    names = ", ".join(sorted({s.target_symbol for s in partial})[:8])
+    raise click.ClickException(
+        f"{selector!r} matches multiple suggestions ({names}). Use a 1-based rank instead."
+    )
+
+
+def _generate_refactoring_code(repo_path, suggestions: list, selector: str, *, fmt: str) -> None:
+    """Opt-in LLM code-gen for one suggestion: resolve provider, enrich, render.
+
+    Reuses the repo's configured provider/model (BYO key). The enrichment layer
+    is the only place the refactoring feature touches an LLM; it never runs in
+    the indexing hot path.
+    """
+    from repowise.cli.helpers import resolve_provider
+    from repowise.core.analysis.health.refactoring.llm import enrich_suggestion
+
+    if not suggestions:
+        raise click.ClickException(
+            "No refactoring suggestions for this repo. Run `repowise health "
+            "--refactoring-targets` first to see what's available."
+        )
+
+    suggestion = _select_suggestion(suggestions, selector)
+
+    try:
+        provider = resolve_provider(None, None, Path(repo_path))
+    except Exception as exc:  # provider misconfig surfaces as a clean CLI error
+        raise click.ClickException(
+            f"Could not resolve an LLM provider for code generation: {exc}"
+        ) from exc
+
+    console.print(
+        f"[dim]Generating code for[/dim] [cyan]{suggestion.target_symbol}[/cyan] "
+        f"[dim]({suggestion.refactoring_type}) via {getattr(provider, 'model_name', '?')}...[/dim]"
+    )
+    result = run_async(enrich_suggestion(suggestion, provider=provider, repo_path=Path(repo_path)))
+
+    if fmt == "json":
+        click.echo(json.dumps(result.to_dict(), indent=2))
+        return
+
+    cached = " [dim](cached)[/dim]" if result.cached else ""
+    console.print(
+        f"\n[bold]{suggestion.refactoring_type}[/bold] · {suggestion.target_symbol} "
+        f"[dim]({result.model})[/dim]{cached}"
+    )
+    if result.validation.get("status") == "checked":
+        v = result.validation
+        verdict = (
+            "[green]improves cohesion[/green]"
+            if v.get("improved")
+            else "[yellow]no LCOM4 improvement detected[/yellow]"
+        )
+        console.print(
+            f"[dim]Self-check: LCOM4 {v.get('before_lcom4')} → "
+            f"max {v.get('after_max_lcom4')} across {v.get('class_count')} classes — {verdict}[/dim]"
+        )
+    console.print(result.content)
+
+
 def _render_refactoring_targets(
-    metrics: list, findings: list, *, fmt: str, limit: int = 20
+    metrics: list, findings: list, suggestions: list | None = None, *, fmt: str, limit: int = 20
 ) -> None:
-    """Aggregate findings per file, rank by impact/effort, render."""
+    """Aggregate findings per file, rank by impact/effort, render.
+
+    When the refactoring layer produced structured *suggestions* (e.g. an
+    Extract Class split), the concrete plan is attached to each target's row
+    (JSON/MD) and printed as a group tree below the table.
+    """
+    suggestions = suggestions or []
+    sugg_by_file: dict[str, list] = {}
+    for s in suggestions:
+        sugg_by_file.setdefault(s.file_path, []).append(s)
+
     by_file: dict[str, list] = {}
     for f in findings:
         by_file.setdefault(f.file_path, []).append(f)
@@ -506,6 +632,7 @@ def _render_refactoring_targets(
         primary = max(fs, key=lambda x: x.health_impact)
         total_impact = round(sum(x.health_impact for x in fs), 3)
         bucket, weight = _effort_bucket(nloc)
+        file_sugg = sugg_by_file.get(path, [])
         targets.append(
             {
                 "file_path": path,
@@ -518,13 +645,21 @@ def _render_refactoring_targets(
                 "effort_bucket": bucket,
                 "impact_per_effort": round(total_impact / weight, 3),
                 "finding_count": len(fs),
+                "plans": [_suggestion_to_dict(s) for s in file_sugg],
             }
         )
     targets.sort(key=lambda t: (-t["impact_per_effort"], -t["total_impact"]))
     targets = targets[:limit]
 
+    # Structured plans are displayed independently of the impact/effort file
+    # table (a god class worth splitting may not top that churn-weighted list).
+    # The order is the engine's unified rank (impact x centrality x blast
+    # radius across all detector types), so we preserve it rather than
+    # re-sorting per type.
+    ranked_plans = [_suggestion_to_dict(s) for s in suggestions][:limit]
+
     if fmt == "json":
-        click.echo(json.dumps({"targets": targets}, indent=2))
+        click.echo(json.dumps({"targets": targets, "refactoring_plans": ranked_plans}, indent=2))
         return
     if fmt == "md":
         click.echo("# Refactoring targets\n")
@@ -534,6 +669,11 @@ def _render_refactoring_targets(
                 f"score {t['score']:.1f}/10, -{t['total_impact']:.2f}) "
                 f"— {t['primary_biomarker']}: {t['primary_reason']}"
             )
+        _render_extract_class_plans_md(ranked_plans)
+        _render_extract_helper_plans_md(ranked_plans)
+        _render_move_method_plans_md(ranked_plans)
+        _render_break_cycle_plans_md(ranked_plans)
+        _render_split_file_plans_md(ranked_plans)
         return
 
     table = Table(title=f"Refactoring targets ({len(targets)})")
@@ -553,6 +693,217 @@ def _render_refactoring_targets(
             t["primary_biomarker"],
         )
     console.print(table)
+    _render_extract_class_plans_console(ranked_plans)
+    _render_extract_helper_plans_console(ranked_plans)
+    _render_move_method_plans_console(ranked_plans)
+    _render_break_cycle_plans_console(ranked_plans)
+    _render_split_file_plans_console(ranked_plans)
+
+
+def _render_extract_class_plans_console(plans: list[dict]) -> None:
+    """Print the concrete Extract Class splits below the table — the wedge."""
+    ec_plans = [p for p in plans if p["refactoring_type"] == "extract_class"]
+    if not ec_plans:
+        return
+    console.print(f"\n[bold]Extract Class plans ({len(ec_plans)})[/bold]")
+    for p in ec_plans:
+        ev = p["evidence"]
+        groups = p["plan"].get("groups", [])
+        console.print(
+            f"\n[cyan]{p['target_symbol']}[/cyan] [dim]({p['file_path']})[/dim] — "
+            f"LCOM4={ev.get('lcom4')}, {ev.get('method_count')} methods, "
+            f"WMC={ev.get('wmc')} → split into {len(groups)} classes "
+            f"[dim](recover ~{p['impact_delta']:.2f}, effort {p['effort_bucket']}, "
+            f"{p['confidence']} confidence)[/dim]"
+        )
+        for i, g in enumerate(groups, 1):
+            fields = ", ".join(g["fields"]) or "—"
+            console.print(
+                f"  [bold]{i}.[/bold] methods: {', '.join(g['methods'])}\n"
+                f"     [dim]fields:[/dim] {fields}"
+            )
+
+
+def _render_extract_class_plans_md(plans: list[dict]) -> None:
+    ec_plans = [p for p in plans if p["refactoring_type"] == "extract_class"]
+    if not ec_plans:
+        return
+    click.echo("\n## Extract Class plans\n")
+    for p in ec_plans:
+        groups = p["plan"].get("groups", [])
+        click.echo(
+            f"- **{p['target_symbol']}** ({p['file_path']}) — "
+            f"LCOM4={p['evidence'].get('lcom4')}, split into {len(groups)} classes:"
+        )
+        for i, g in enumerate(groups, 1):
+            fields = ", ".join(g["fields"]) or "—"
+            click.echo(f"  {i}. methods: {', '.join(g['methods'])}  ·  fields: {fields}")
+
+
+def _render_extract_helper_plans_console(plans: list[dict]) -> None:
+    """Print the concrete Extract Helper (clone dedup) plans below the table."""
+    eh_plans = [p for p in plans if p["refactoring_type"] == "extract_helper"]
+    if not eh_plans:
+        return
+    console.print(f"\n[bold]Extract Helper plans ({len(eh_plans)})[/bold]")
+    for p in eh_plans:
+        ev = p["evidence"]
+        occ = p["plan"].get("occurrences", [])
+        site = p["plan"].get("suggested_site", {}) or {}
+        where = site.get("module") or site.get("directory") or "a shared module"
+        co = ev.get("co_change_count", 0)
+        console.print(
+            f"\n[cyan]{ev.get('duplicated_lines')} duplicated lines[/cyan] across "
+            f"{len(occ)} sites → extract a helper near [bold]{where}[/bold] "
+            f"[dim](recover ~{p['impact_delta']:.2f}, effort {p['effort_bucket']}, "
+            f"{p['confidence']} confidence" + (f", co-changed {co}x" if co else "") + ")[/dim]"
+        )
+        for o in occ:
+            console.print(f"  [dim]-[/dim] {o['file']}:{o['line_start']}-{o['line_end']}")
+
+
+def _render_extract_helper_plans_md(plans: list[dict]) -> None:
+    eh_plans = [p for p in plans if p["refactoring_type"] == "extract_helper"]
+    if not eh_plans:
+        return
+    click.echo("\n## Extract Helper plans\n")
+    for p in eh_plans:
+        ev = p["evidence"]
+        occ = p["plan"].get("occurrences", [])
+        site = p["plan"].get("suggested_site", {}) or {}
+        where = site.get("module") or site.get("directory") or "a shared module"
+        click.echo(
+            f"- **{ev.get('duplicated_lines')} duplicated lines** across "
+            f"{len(occ)} sites — extract a helper near `{where}`:"
+        )
+        for o in occ:
+            click.echo(f"  - {o['file']}:{o['line_start']}-{o['line_end']}")
+
+
+def _render_move_method_plans_console(plans: list[dict]) -> None:
+    """Print the concrete Move Method (feature-envy) plans below the table."""
+    mm_plans = [p for p in plans if p["refactoring_type"] == "move_method"]
+    if not mm_plans:
+        return
+    console.print(f"\n[bold]Move Method plans ({len(mm_plans)})[/bold]")
+    for p in mm_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        to_file = pl.get("to_file")
+        dest = f"{pl.get('to_class')}" + (f" [dim]({to_file})[/dim]" if to_file else "")
+        console.print(
+            f"\n[cyan]{pl.get('from_class')}.{pl.get('method')}[/cyan] "
+            f"[dim]({p['file_path']})[/dim] → move to [bold]{dest}[/bold] "
+            f"[dim](uses {ev.get('foreign_calls')} of its members vs "
+            f"{ev.get('own_calls')} of its own, effort {p['effort_bucket']}, "
+            f"{p['confidence']} confidence)[/dim]"
+        )
+
+
+def _render_move_method_plans_md(plans: list[dict]) -> None:
+    mm_plans = [p for p in plans if p["refactoring_type"] == "move_method"]
+    if not mm_plans:
+        return
+    click.echo("\n## Move Method plans\n")
+    for p in mm_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        dest = pl.get("to_class")
+        if pl.get("to_file"):
+            dest = f"{dest} ({pl['to_file']})"
+        click.echo(
+            f"- **{pl.get('from_class')}.{pl.get('method')}** ({p['file_path']}) "
+            f"— move to `{dest}` "
+            f"(uses {ev.get('foreign_calls')} vs {ev.get('own_calls')} own members)"
+        )
+
+
+def _render_break_cycle_plans_console(plans: list[dict]) -> None:
+    """Print the concrete Break Cycle (import-cycle cut) plans below the table."""
+    bc_plans = [p for p in plans if p["refactoring_type"] == "break_cycle"]
+    if not bc_plans:
+        return
+    console.print(f"\n[bold]Break Cycle plans ({len(bc_plans)})[/bold]")
+    for p in bc_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        cuts = pl.get("cut_edges", [])
+        console.print(
+            f"\n[cyan]Import cycle of {ev.get('cycle_size')} files[/cyan] "
+            f"[dim]({ev.get('edge_count')} edges)[/dim] → cut "
+            f"{len(cuts)} edge(s) "
+            f"[dim](effort {p['effort_bucket']}, {p['confidence']} confidence)[/dim]"
+        )
+        for e in cuts:
+            console.print(f"  [dim]-[/dim] invert {e['from']} → {e['to']}")
+        for f in pl.get("cycle", []):
+            console.print(f"  [dim]·[/dim] {f}")
+
+
+def _render_break_cycle_plans_md(plans: list[dict]) -> None:
+    bc_plans = [p for p in plans if p["refactoring_type"] == "break_cycle"]
+    if not bc_plans:
+        return
+    click.echo("\n## Break Cycle plans\n")
+    for p in bc_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        cuts = pl.get("cut_edges", [])
+        click.echo(f"- **Import cycle of {ev.get('cycle_size')} files** — cut {len(cuts)} edge(s):")
+        for e in cuts:
+            click.echo(f"  - invert {e['from']} -> {e['to']}")
+
+
+def _render_split_file_plans_console(plans: list[dict]) -> None:
+    """Print the concrete Split File (module decomposition) plans below the table."""
+    sf_plans = [p for p in plans if p["refactoring_type"] == "split_file"]
+    if not sf_plans:
+        return
+    console.print(f"\n[bold]Split File plans ({len(sf_plans)})[/bold]")
+    for p in sf_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        groups = pl.get("groups", [])
+        br = p["blast_radius"]
+        shim = " [dim]+shim[/dim]" if pl.get("shim_required") else ""
+        console.print(
+            f"\n[cyan]{p['file_path']}[/cyan] — "
+            f"{ev.get('symbol_count')} symbols, {ev.get('file_nloc')} NLOC, "
+            f"modularity {ev.get('modularity')} → split into {len(groups)} files{shim} "
+            f"[dim](effort {p['effort_bucket']}, {p['confidence']} confidence, "
+            f"{br.get('import_rewrites', 0)} import rewrites in "
+            f"{br.get('dependent_count', 0)} files)[/dim]"
+        )
+        for i, g in enumerate(groups, 1):
+            console.print(
+                f"  [bold]{i}.[/bold] [green]{g.get('suggested_file')}[/green]: "
+                f"{', '.join(g.get('symbols', []))}"
+            )
+        residual = pl.get("residual")
+        if residual and residual.get("symbols"):
+            console.print(f"  [dim]core (shared):[/dim] {', '.join(residual['symbols'])}")
+
+
+def _render_split_file_plans_md(plans: list[dict]) -> None:
+    sf_plans = [p for p in plans if p["refactoring_type"] == "split_file"]
+    if not sf_plans:
+        return
+    click.echo("\n## Split File plans\n")
+    for p in sf_plans:
+        pl = p["plan"]
+        ev = p["evidence"]
+        groups = pl.get("groups", [])
+        click.echo(
+            f"- **{p['file_path']}** — {ev.get('symbol_count')} symbols, "
+            f"modularity {ev.get('modularity')}, split into {len(groups)} files:"
+        )
+        for i, g in enumerate(groups, 1):
+            click.echo(
+                f"  {i}. `{g.get('suggested_file')}`: {', '.join(g.get('symbols', []))}"
+            )
+        residual = pl.get("residual")
+        if residual and residual.get("symbols"):
+            click.echo(f"  - core (shared): {', '.join(residual['symbols'])}")
 
 
 def _render_trend(repo_path: object, *, fmt: str) -> None:
@@ -705,9 +1056,7 @@ def _persist_health(
                     average_health=float(kpis.get("average_health", 10.0)),
                     worst_performer_path=kpis.get("worst_performer_path"),
                     worst_performer_score=kpis.get("worst_performer_score"),
-                    per_file_scores={
-                        m.file_path: round(float(m.score), 2) for m in metrics
-                    },
+                    per_file_scores={m.file_path: round(float(m.score), 2) for m in metrics},
                 )
             except Exception as exc:
                 console.print(f"[yellow]Snapshot write skipped: {exc}[/yellow]")

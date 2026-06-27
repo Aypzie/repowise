@@ -178,6 +178,7 @@ async def run_pipeline(
     existing_kg_fingerprint: str | None = None,
     on_page_ready: Any | None = None,
     resume_controller: ResumeController | None = None,
+    coverage_report_paths: list[Path] | None = None,
 ) -> PipelineResult:
     """Run the repowise indexing/analysis/generation pipeline.
 
@@ -186,7 +187,7 @@ async def run_pipeline(
     repo_path:
         Path to an already-cloned repository on disk.
     commit_depth:
-        Maximum commits to analyse per file (1-5000). Default 500.
+        Maximum commits to analyse per file (1-10000). Default 500.
     follow_renames:
         Use ``git log --follow`` to track files across renames.
     skip_tests:
@@ -225,7 +226,7 @@ async def run_pipeline(
     repo_path = Path(repo_path).resolve()
     start = time.monotonic()
 
-    commit_depth = max(1, min(commit_depth, 5000))
+    commit_depth = max(1, min(commit_depth, 10000))
 
     # Mode policy: FAST forces ESSENTIAL git indexing and disables doc
     # generation (and therefore all LLM calls). STANDARD preserves the
@@ -463,7 +464,12 @@ async def run_pipeline(
         )
 
         health_report = await _run_health_analysis(
-            graph_builder, git_meta_map, parsed_files, repo_path=repo_path, progress=progress
+            graph_builder,
+            git_meta_map,
+            parsed_files,
+            repo_path=repo_path,
+            coverage_report_paths=coverage_report_paths,
+            progress=progress,
         )
 
         # Drop the in-memory-only ``BlameIndex`` now that the health biomarkers

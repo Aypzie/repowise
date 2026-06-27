@@ -58,6 +58,23 @@ class FunctionComplexity:
 
 
 @dataclass
+class CohesionGroup:
+    """One LCOM4 connected component within a class.
+
+    A cluster of methods that share instance state (a field or a
+    method-call edge), plus the instance fields the cluster collectively
+    touches. Emitted as a side-channel by ``_compute_lcom4`` and consumed
+    by the Extract Class refactoring detector — when a class has
+    ``lcom4 >= 2`` each group is a candidate extracted class. ``methods``
+    and ``fields`` are stable-sorted (by first appearance / name) so the
+    same class yields the same split across runs.
+    """
+
+    methods: list[str]
+    fields: list[str]
+
+
+@dataclass
 class ClassComplexity:
     """Per-class aggregate metrics produced by the walker.
 
@@ -71,6 +88,12 @@ class ClassComplexity:
     ``1`` means a fully cohesive class (or "no signal": see the safety
     valve in ``_compute_lcom4``). Higher values mean the class splinters
     into unrelated method clusters.
+
+    ``components`` carries those connected components as ``CohesionGroup``
+    records (the method+field membership behind the ``lcom4`` integer).
+    Empty when there is no cohesion signal (``lcom4`` was the ``1`` safety
+    valve); otherwise ``len(components) == lcom4``. The Extract Class
+    refactoring detector reads it directly — it *is* the split.
     """
 
     name: str
@@ -82,6 +105,14 @@ class ClassComplexity:
     lcom4: int = 1
     max_method_ccn: int = 0
     field_count: int = 0
+    components: list[CohesionGroup] = field(default_factory=list)
+    # Tight Class Cohesion (Bieman-Kang): the fraction of method pairs that
+    # share at least one instance field, in ``[0, 1]`` — higher is more
+    # cohesive. ``1.0`` is the "no signal" default (fewer than two methods, or
+    # a language whose member access we do not map), mirroring the ``lcom4``
+    # safety valve. A cohesive Extract Class split raises the worst split
+    # class's TCC toward ``1``; the enrich self-check reads it before/after.
+    tcc: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -246,3 +277,10 @@ class FileComplexity:
     # function holds a bare (non-loop) I/O sink. Empty when the language opts
     # out of the perf pass. Consumed by ``perf.crossfn``, not by a biomarker.
     perf_fn_facts: list[PerfFnFacts] = field(default_factory=list)
+    # True when the file carries co-located tests that the filename/dir
+    # heuristic cannot see — e.g. Rust ``#[cfg(test)] mod tests`` blocks,
+    # which live inside the source file itself. OR'd into ``has_test_file``
+    # so well-tested inline-test files aren't flagged as untested. Only ever
+    # flips a file from "untested" to "tested", so it can silence a finding
+    # but never invent one.
+    has_inline_tests: bool = False

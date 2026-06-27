@@ -44,6 +44,13 @@ from .perf import (
     collect_centrality_gated,
     collect_crossfn_io_in_loop,
 )
+from .refactoring import (
+    RefactoringContext,
+    RefactoringSuggestion,
+    detect_refactorings,
+    rank_suggestions,
+)
+from .refactoring.graph_signals import build_file_scc_index
 from .scoring import attach_impacts, compute_kpis, remap_severities, score_file
 
 log = structlog.get_logger(__name__)
@@ -348,8 +355,13 @@ class HealthAnalyzer:
                 log.debug("health_duplication_failed", error=str(exc))
                 dup_report = DuplicationReport()
 
+        disabled_refactorings: list[str] = list(cfg.get("disabled_refactorings", ()))
+        # Repo-wide SCC index (import cycles), computed once and threaded into
+        # each file's RefactoringContext so Break Cycle never recomputes it.
+        file_scc_index = build_file_scc_index(self.graph)
         findings: list[HealthFindingData] = []
         metrics: list[HealthFileMetricData] = []
+        suggestions: list[RefactoringSuggestion] = []
 
         # Pre-walk every target so we can compute the repo-wide p80 of
         # per-function modification counts ONCE before any biomarker runs.
@@ -390,7 +402,7 @@ class HealthAnalyzer:
                         file_disabled.append(name)
             file_severity_overrides = dict(repo_severity_overrides)
             file_severity_overrides.update(per_file_severity_overrides.get(pf.file_info.path, {}))
-            file_metric, file_findings = self._evaluate_file(
+            file_metric, file_findings, file_suggestions = self._evaluate_file(
                 pf,
                 fcx,
                 path_basenames,
@@ -402,9 +414,12 @@ class HealthAnalyzer:
                 repo_dependents_p80=repo_dependents_p80,
                 repo_active_contributors_90d=repo_active_contributors,
                 severity_overrides=file_severity_overrides or None,
+                disabled_refactorings=disabled_refactorings,
+                file_scc_index=file_scc_index,
             )
             metrics.append(file_metric)
             findings.extend(file_findings)
+            suggestions.extend(file_suggestions)
 
             if on_step:
                 on_step(pf.file_info.path)
@@ -418,6 +433,9 @@ class HealthAnalyzer:
         else:
             kpis = {}
 
+        suggestions = rank_suggestions(
+            suggestions, centrality=self._refactoring_centrality(suggestions)
+        )
         return HealthReport(
             repo_id="",
             analyzed_at=datetime.now(UTC),
@@ -425,6 +443,7 @@ class HealthAnalyzer:
             metrics=metrics,
             kpis=kpis,
             function_blame_rows=self._function_blame_rows(walked),
+            refactoring_suggestions=suggestions,
         )
 
     async def analyze_async(
@@ -530,8 +549,11 @@ class HealthAnalyzer:
         walked = list(walked)
         self._apply_crossfn_perf(walked)
 
+        disabled_refactorings: list[str] = list(cfg.get("disabled_refactorings", ()))
+        file_scc_index = build_file_scc_index(self.graph)
         findings: list[HealthFindingData] = []
         metrics: list[HealthFileMetricData] = []
+        suggestions: list[RefactoringSuggestion] = []
         for pf, fcx in walked:
             self._populate_symbol_complexity(pf, fcx.functions)
             file_disabled = list(disabled)
@@ -542,7 +564,7 @@ class HealthAnalyzer:
                         file_disabled.append(name)
             file_severity_overrides = dict(repo_severity_overrides)
             file_severity_overrides.update(per_file_severity_overrides.get(pf.file_info.path, {}))
-            file_metric, file_findings = self._evaluate_file(
+            file_metric, file_findings, file_suggestions = self._evaluate_file(
                 pf,
                 fcx,
                 path_basenames,
@@ -554,9 +576,12 @@ class HealthAnalyzer:
                 repo_dependents_p80=repo_dependents_p80,
                 repo_active_contributors_90d=repo_active_contributors,
                 severity_overrides=file_severity_overrides or None,
+                disabled_refactorings=disabled_refactorings,
+                file_scc_index=file_scc_index,
             )
             metrics.append(file_metric)
             findings.extend(file_findings)
+            suggestions.extend(file_suggestions)
             if on_step:
                 on_step(pf.file_info.path)
 
@@ -566,6 +591,9 @@ class HealthAnalyzer:
         else:
             kpis = {}
 
+        suggestions = rank_suggestions(
+            suggestions, centrality=self._refactoring_centrality(suggestions)
+        )
         return HealthReport(
             repo_id="",
             analyzed_at=datetime.now(UTC),
@@ -573,11 +601,30 @@ class HealthAnalyzer:
             metrics=metrics,
             kpis=kpis,
             function_blame_rows=self._function_blame_rows(walked),
+            refactoring_suggestions=suggestions,
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _refactoring_centrality(self, suggestions: list[RefactoringSuggestion]) -> dict[str, float]:
+        """File-dependency centrality (importer in-degree) for each file a
+        suggestion targets — the cheap, deterministic proxy ``rank`` blends
+        with impact + blast radius. Empty when the health pass ran without a
+        graph (the ranking then degrades to impact + blast only)."""
+        if self.graph is None:
+            return {}
+        out: dict[str, float] = {}
+        for s in suggestions:
+            path = s.file_path
+            if path in out or path not in self.graph:
+                continue
+            try:
+                out[path] = float(self.graph.in_degree(path))
+            except Exception:
+                out[path] = 0.0
+        return out
 
     def _apply_crossfn_perf(self, walked: list[tuple[Any, FileComplexity]]) -> None:
         """Run the graph-dependent perf passes over the walked files, in place.
@@ -674,7 +721,9 @@ class HealthAnalyzer:
         repo_dependents_p80: int | None = None,
         repo_active_contributors_90d: int | None = None,
         severity_overrides: dict[str, Severity] | None = None,
-    ) -> tuple[HealthFileMetricData, list[HealthFindingData]]:
+        disabled_refactorings: list[str] | None = None,
+        file_scc_index: dict[str, tuple[str, ...]] | None = None,
+    ) -> tuple[HealthFileMetricData, list[HealthFindingData], list[RefactoringSuggestion]]:
         file_path = pf.file_info.path
 
         fc_list = fcx.functions
@@ -713,7 +762,8 @@ class HealthAnalyzer:
             nloc=nloc,
             has_test_file=_has_paired_test_file(file_path, path_basenames)
             or _is_test_file(file_path)
-            or _coverage_is_test_file(file_path),
+            or _coverage_is_test_file(file_path)
+            or fcx.has_inline_tests,
             module=module,
             function_metrics=fn_metrics,
             class_metrics=fcx.classes,
@@ -764,7 +814,24 @@ class HealthAnalyzer:
             maintainability_score=(round(maint_score, 2) if maint_score is not None else None),
             performance_score=(round(perf_score, 2) if perf_score is not None else None),
         )
-        return metric, findings
+
+        # Refactoring layer: reuse the data just computed (class cohesion
+        # components + this file's findings) to emit structured suggestions.
+        # Fault-isolated per detector; degrades to [] on any missing signal.
+        rctx = RefactoringContext(
+            file_path=file_path,
+            language=pf.file_info.language,
+            nloc=nloc,
+            classes=fcx.classes,
+            findings=findings,
+            dependents_count=dependents_count,
+            clones=list(clones),
+            module_map=self.module_map,
+            graph=self.graph,
+            file_scc=(file_scc_index or {}).get(file_path),
+        )
+        suggestions = detect_refactorings(rctx, disabled=disabled_refactorings or ())
+        return metric, findings, suggestions
 
     def _is_hotspot(self, meta: dict | object) -> bool:
         if isinstance(meta, dict):
